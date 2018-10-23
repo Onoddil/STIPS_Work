@@ -1,7 +1,7 @@
 import os
 import sys
 from glob import glob
-path = '../STScI-STIPS'
+path = '../../STScI-STIPS'
 sys.path.insert(1, path)
 import stips
 print stips.__file__, stips.__version__
