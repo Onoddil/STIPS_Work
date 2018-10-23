@@ -1,4 +1,10 @@
+*/*.txt
+*/*.pdf
+*/*.fits
+*/*.tmp
 *.txt
 *.pdf
 *.fits
 *.tmp
+.DS_Store
+*/.DS_Store

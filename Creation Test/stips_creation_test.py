@@ -31,8 +31,15 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     gs = gridspec.GridSpec(y, x, **kwargs)
     return gs
 
+import logging
+file_ = open('creation_test.log', 'w+')
+stream_handler = logging.StreamHandler(file_)
+stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(stream_handler)
 
-scm = SceneModule()
+scm = SceneModule(logger=logger)
 
 stellar = {'n_stars': 50000,
            'age_low': 1.0e12, 'age_high': 1.0e12,
@@ -64,7 +71,8 @@ obs = {'instrument': 'WFI',
        'observations_id': 1,
        'exptime': 1000,
        'offsets': [{'offset_id': 1, 'offset_centre': False, 'offset_ra': 0.0, 'offset_dec': 0.0, 'offset_pa': 0.0}]}
-obm = ObservationModule(obs)
+
+obm = ObservationModule(obs, logger=logger)
 obm.nextObservation()
 output_stellar_catalogues = obm.addCatalogue(stellar_cat_file)
 output_galaxy_catalogues = obm.addCatalogue(galaxy_cat_file)
@@ -78,7 +86,7 @@ image = f[1].data
 import matplotlib.pyplot as plt
 
 from astropy.visualization import simple_norm
-norm = simple_norm(image, 'log', min_percent=85, max_percent=99.8)
+norm = simple_norm(image, 'log', min_percent=90, max_percent=99.95)
 
 gs = gridcreate('111', 1, 1, 0.8, 15)
 ax = plt.subplot(gs[0])
@@ -88,7 +96,7 @@ ax.set_ylabel('y / pixel')
 plt.tight_layout()
 plt.savefig('test_image.pdf')
 
-obm = ObservationModule(obs)
+obm = ObservationModule(obs, logger=logger)
 obm.nextObservation()
 output_stellar_catalogues = obm.addCatalogue(stellar_cat_file)
 psf_file = obm.addError()
@@ -101,7 +109,7 @@ image = f[1].data
 import matplotlib.pyplot as plt
 
 from astropy.visualization import simple_norm
-norm = simple_norm(image, 'log', min_percent=85, max_percent=99.8)
+norm = simple_norm(image, 'log', min_percent=90, max_percent=99.95)
 
 gs = gridcreate('111', 1, 1, 0.8, 15)
 ax = plt.subplot(gs[0])
@@ -111,7 +119,7 @@ ax.set_ylabel('y / pixel')
 plt.tight_layout()
 plt.savefig('test_image_stars.pdf')
 
-obm = ObservationModule(obs)
+obm = ObservationModule(obs, logger=logger)
 obm.nextObservation()
 output_galaxy_catalogues = obm.addCatalogue(galaxy_cat_file)
 psf_file = obm.addError()
@@ -124,7 +132,7 @@ image = f[1].data
 import matplotlib.pyplot as plt
 
 from astropy.visualization import simple_norm
-norm = simple_norm(image, 'log', min_percent=85, max_percent=99.8)
+norm = simple_norm(image, 'log', min_percent=9, max_percent=99.95)
 
 gs = gridcreate('111', 1, 1, 0.8, 15)
 ax = plt.subplot(gs[0])
