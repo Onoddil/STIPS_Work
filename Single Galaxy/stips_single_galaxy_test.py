@@ -94,7 +94,7 @@ for i in xrange(0, 4):
                'offset_ra': 0.0, 'offset_dec': 0.0}
     stellar_cat_file = scm.CreatePopulation(stellar)
 
-    # See if this can be generalised to skip both \ and | comments.
+    # See if this can be generalised to skip both \ and | comments. -- comment can be sequence
     gal = np.load(new_galaxy_cat_file, skiprows=24)
     # then we need to load this file and get the redshift z to get the distance for column 3
     # below; set absolute magnitude to -19 and then calculate the apparent magnitude
