@@ -19,16 +19,8 @@ from astropy.visualization import simple_norm
 from stips.scene_module import SceneModule
 from stips.observation_module import ObservationModule
 
-# import astropy.io.fits as pyfits
-# import numpy as np
-# f = pyfits.open('/home/ono/Documents/STScI-STIPS/CDBS/grid/bc95/templates/bc95_d_50E8.fits')
-# g = f[1].data
-# print g
-# print g.shape
-# w = np.array([i[0] for i in g])
-# fl = np.array([i[1] for i in g])
-# print np.percentile(w, [0, 10, 25, 50, 75, 90, 100]), np.percentile(fl, [0, 10, 25, 50, 75, 90, 100])
-# sys.exit()
+import sncosmo
+import astropy.units as u
 
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
@@ -40,13 +32,16 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     gs = gridspec.GridSpec(y, x, **kwargs)
     return gs
 
+# TODO: add dithered observation of just galaxy (i.e., move centre by uniform([0, 1])*pixelscale)
+# in sky position to then subsequently subtract from galaxy+supernova observation
 
-gs = gridcreate('111', 4, 4, 0.8, 15)
 
-for i in xrange(0, 16):
+ngals = 1
+filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
+nfilts = len(filters)
+gs = gridcreate('111', ngals, nfilts, 0.8, 15)
 
-    ax = plt.subplot(gs[i])
-
+for i in xrange(0, ngals):
     file_ = open('creation_test.log', 'w+')
     stream_handler = logging.StreamHandler(file_)
     stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
@@ -56,12 +51,15 @@ for i in xrange(0, 16):
 
     scm = SceneModule(logger=logger)
 
+    # assuming surface brightnesses vary between roughly mu_e = 18-23 mag/arcsec^2 (mcgaugh
+    # 1995, driver 2005)
+
     np.random.seed(seed=None)
     seedg = np.random.randint(100000)
     galaxy = {'n_gals': 500,
               'z_low': 0.0, 'z_high': 1.0,
               'rad_low': 0.5, 'rad_high': 2.0,
-              'sb_v_low': 25.0, 'sb_v_high': 25.0,
+              'sb_v_low': 23.0, 'sb_v_high': 18.0,
               'distribution': 'uniform', 'clustered': False,
               'radius': 0.0, 'radius_units': 'arcsec',
               'offset_ra': 0.0, 'offset_dec': 0.0, 'seed': seedg}
@@ -86,7 +84,8 @@ for i in xrange(0, 16):
     # pretending that F125W on WFC3/IR is 2MASS J, we set the absolute magnitude of a
     # type Ia supernova to J = -19.0 (meikle 2018). set supernova to a star of the closest
     # blackbody (10000K; Zheng 2017) -- code uses Johnson I magnitude but Phillips (1993) says that
-    # is also ~M = -19
+    # is also ~M = -19 -- currently just setting all absolute magnitudes to -19, but could change
+    # if needed
 
     # random offsets for star should be in arcseconds; pixel scale is 0.11 arcsecond/pixel
     rand_ra = -offset_r + np.random.random_sample() * 2 * offset_r
@@ -104,78 +103,102 @@ for i in xrange(0, 16):
     stellar_cat_file = scm.CreatePopulation(stellar)
 
     z = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=3)
-    # then we need to load this file and get the redshift z to get the distance for column 3
-    # below; set absolute magnitude to -19 and then calculate the apparent magnitude
-    g = np.loadtxt(stellar_cat_file, comments=['\\', '|'])
-    temp_fit = np.argmin(np.abs(g[:, 7] - 10000))
+    # salt2 for Ia, s11-* where * is 2004hx for IIL/P, 2005hm for Ib, and 2006fo for Ic
 
-    # We need to change the distance and apparent magnitude, so edit (zero-indexed)
-    # columns 3 and 12.
-    g = g[temp_fit]
+    # draw salt2 x1 and c from salt2_parameters (gaussian, x1: x0=0.4, sigma=0.9, c: x0=-0.04,
+    # sigma = 0.1) -- SALT2 only goes 2000-9200Angstrom, so is unuseable in the NIR
+    # hsiao is valid over a wider wavelength range but has no stretch factor.
+    # Hounsell 2017 gives SALT2 models over a wider wavelength range, given as sncosmo source
+    # salt2-h17. both salt2 models have phases -20 to +50 days.
+    sn_model = sncosmo.Model('salt2-h17')
+    sn_model.set(t0=0.0, z=z, x1=0.5, c=0.0)
 
-    h = 0.7
-    mu = 42.38 - 5 * np.log10(h) + 5 * np.log10(z) + 5 * np.log10(1+z)
-    dl = 10**(mu/5 + 1)
-    M_ia = -19
-    m_ia = M_ia + mu
+    for j in xrange(0, nfilts):
+        ax = plt.subplot(gs[i, j])
 
-    # if we need the 'star' of M = -19 at distance dl then it has an apparent magnitude of
-    # M + dl. thus after creating the source we need to move its distance modulus and apparent
-    # magnitude by dM (the difference in absolute magnitudes)
+        # then we need to load this file and get the redshift z to get the distance for column 3
+        # below; set absolute magnitude to -19 and then calculate the apparent magnitude
+        g = np.loadtxt(stellar_cat_file, comments=['\\', '|'])
+        temp_fit = np.argmin(np.abs(g[:, 7] - 10000))
 
-    dmu = m_ia - g[12]
-    g[12] = g[12] + dmu
-    mu_s = 5 * np.log10(g[3]) - 5
-    g[3] = 10**((mu_s + dmu)/5 - 1)
+        # We need to change the distance and apparent magnitude, so edit (zero-indexed)
+        # columns 3 and 12.
+        g = g[temp_fit]
 
-    star_cat_base, star_cat_ext = os.path.splitext(stellar_cat_file)
-    new_stellar_cat_file = star_cat_base + '_single_star' + star_cat_ext
-    f_w = open(new_stellar_cat_file, 'w+')
-    with open(stellar_cat_file, 'r') as f_r:
-        for line in f_r:
-            if line[0] != "\\" and line[0] != "|":
-                break
-            f_w.write(line)
-    entry = ''
-    # to force columns to line up with | breaks, each column must be a specific length, which is
-    # for id, ra, dec, distance, age, metallicity, mass, teff, logg, binary, dataset, absolute and
-    # apparent 8, 17, 17, 17, 17, 11, 17, 14, 12, 6, 7, 14, 12
-    collengths = [8, 17, 17, 17, 17, 11, 17, 14, 12, 6, 7, 14, 12]
-    dtypes = [int, float, float, float, int, float, float, float, float, int, int, float, float]
-    for i, collength, dtype in zip(g, collengths, dtypes):
-        i_ = dtype(i)
-        entry = entry + ' {}{}'.format(i_, ' ' * (collength - len(str(i_))))
-    entry = entry + '\n'
-    f_w.write(entry)
-    f_w.close()
+        # h = 0.7
+        # mu = 42.38 - 5 * np.log10(h) + 5 * np.log10(z) + 5 * np.log10(1+z)
+        # dl = 10**(mu/5 + 1)
+        # M_ia = -19
+        # m_ia = M_ia + mu
 
-    seedo = np.random.randint(100000)
-    obs = {'instrument': 'WFI',
-           'filters': ['H158'],
-           'detectors': 1,
-           'distortion': False,
-           'oversample': 5,
-           'pupil_mask': '',
-           'background': 'avg',
-           'observations_id': 1,
-           'exptime': 1000,
-           'offsets': [{'offset_id': 1, 'offset_centre': False, 'offset_ra': 0.0, 'offset_dec': 0.0, 'offset_pa': 0.0}],
-           'small_subarray': True, 'seed': seedo}
+        # get the apparent magnitude of the supernova at a given time; first create the appropriate
+        # filter for the observation
+        f = pyfits.open('../../pandeia_data-1.0/wfirst/wfirstimager/filters/{}.fits'.format(filters[j]))
+        data = f[1].data
+        dispersion = [d[0] for d in data]
+        transmission = [d[1] for d in data]
+        bandpass = sncosmo.Bandpass(dispersion, transmission, wave_unit=u.micron, name=filters[j])
+        sn_model.set_source_peakabsmag(-19.0, bandpass, 'ab')
+        # TODO: change time to uniformly sample time series data
+        m_ia = sn_model.bandmag(bandpass, magsys='ab', time=0)
 
-    obm = ObservationModule(obs, logger=logger)
-    obm.nextObservation()
-    output_galaxy_catalogues = obm.addCatalogue(new_galaxy_cat_file)
-    output_stellar_catalogues = obm.addCatalogue(new_stellar_cat_file)
-    psf_file = obm.addError()
-    fits_file, mosaic_file, params = obm.finalize(mosaic=False)
+        # if we need the 'star' of absolute magnitude M at distance dl then it has an apparent
+        # magnitude of M + dl. thus after creating the source we need to move its distance modulus
+        # and apparent magnitude by dM (the difference in absolute magnitudes)
 
-    f = pyfits.open(fits_file)
-    image = f[1].data
+        dmu = m_ia - g[12]
+        g[12] = g[12] + dmu
+        mu_s = 5 * np.log10(g[3]) - 5
+        g[3] = 10**((mu_s + dmu)/5 - 1)
 
-    norm = simple_norm(image, 'log', min_percent=90, max_percent=99.95)
+        star_cat_base, star_cat_ext = os.path.splitext(stellar_cat_file)
+        new_stellar_cat_file = star_cat_base + '_single_star' + star_cat_ext
+        f_w = open(new_stellar_cat_file, 'w+')
+        with open(stellar_cat_file, 'r') as f_r:
+            for line in f_r:
+                if line[0] != "\\" and line[0] != "|":
+                    break
+                f_w.write(line)
+        entry = ''
+        # to force columns to line up with | breaks, each column must be a specific length, which is
+        # for id, ra, dec, distance, age, metallicity, mass, teff, logg, binary, dataset, absolute and
+        # apparent 8, 17, 17, 17, 17, 11, 17, 14, 12, 6, 7, 14, 12
+        collengths = [8, 17, 17, 17, 17, 11, 17, 14, 12, 6, 7, 14, 12]
+        dtypes = [int, float, float, float, int, float, float, float, float, int, int, float, float]
+        for k, collength, dtype in zip(g, collengths, dtypes):
+            k_ = dtype(k)
+            entry = entry + ' {}{}'.format(k_, ' ' * (collength - len(str(k_))))
+        entry = entry + '\n'
+        f_w.write(entry)
+        f_w.close()
 
-    ax.imshow(image, origin='lower', cmap='viridis', norm=norm)
-    ax.set_xlabel('x / pixel')
-    ax.set_ylabel('y / pixel')
+        seedo = np.random.randint(100000)
+        obs = {'instrument': 'WFI',
+               'filters': [filters[j].upper()],
+               'detectors': 1,
+               'distortion': False,
+               'oversample': 5,
+               'pupil_mask': '',
+               'background': 'avg',
+               'observations_id': 1,
+               'exptime': 1000,
+               'offsets': [{'offset_id': 1, 'offset_centre': False, 'offset_ra': 0.0, 'offset_dec': 0.0, 'offset_pa': 0.0}],
+               'small_subarray': True, 'seed': seedo}
+
+        obm = ObservationModule(obs, logger=logger)
+        obm.nextObservation()
+        output_galaxy_catalogues = obm.addCatalogue(new_galaxy_cat_file)
+        output_stellar_catalogues = obm.addCatalogue(new_stellar_cat_file)
+        psf_file = obm.addError()
+        fits_file, mosaic_file, params = obm.finalize(mosaic=False)
+
+        f = pyfits.open(fits_file)
+        image = f[1].data
+
+        norm = simple_norm(image, 'log', min_percent=90, max_percent=99.95)
+
+        ax.imshow(image, origin='lower', cmap='viridis', norm=norm)
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
 plt.tight_layout()
 plt.savefig('test_galaxy.pdf')
