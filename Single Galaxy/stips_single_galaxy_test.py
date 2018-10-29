@@ -39,17 +39,18 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
 ngals = 1
 filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
 nfilts = len(filters)
-gs = gridcreate('111', ngals, nfilts, 0.8, 15)
+pixel_scale = 0.11  # arcsecond/pixel
+gs = gridcreate('111', ngals, 2*nfilts, 0.8, 15)
 
 for i in xrange(0, ngals):
-    file_ = open('creation_test.log', 'w+')
+    file_ = open('temp_files/creation_test.log', 'w+')
     stream_handler = logging.StreamHandler(file_)
     stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logger.addHandler(stream_handler)
 
-    scm = SceneModule(logger=logger)
+    scm = SceneModule(logger=logger, out_path='temp_files')
 
     # assuming surface brightnesses vary between roughly mu_e = 18-23 mag/arcsec^2 (mcgaugh
     # 1995, driver 2005)
@@ -62,7 +63,7 @@ for i in xrange(0, ngals):
               'sb_v_low': 23.0, 'sb_v_high': 18.0,
               'distribution': 'uniform', 'clustered': False,
               'radius': 0.0, 'radius_units': 'arcsec',
-              'offset_ra': 0.0, 'offset_dec': 0.0, 'seed': seedg}
+              'offset_ra': 0.00001, 'offset_dec': 0.00001, 'seed': seedg}
     galaxy_cat_file = scm.CreateGalaxies(galaxy)
     gal_cat_base, gal_cat_ext = os.path.splitext(galaxy_cat_file)
     new_galaxy_cat_file = gal_cat_base + '_single_galaxy' + gal_cat_ext
@@ -72,6 +73,64 @@ for i in xrange(0, ngals):
             f_w.write(line)
             if line[0] != "\\" and line[0] != "|":
                 break
+    f_w.close()
+
+    # create second version of single galaxy file, just with minorly offset ra/dec, uniformly
+    # offset by a random amount of a pixel in each direction
+
+    new_gal_cat_base, new_gal_cat_ext = os.path.splitext(new_galaxy_cat_file)
+    shifted_galaxy_cat_file = new_gal_cat_base + '_single_galaxy_shift' + new_gal_cat_ext
+    f_w = open(shifted_galaxy_cat_file, 'w+')
+    col_get_flag = 0
+    with open(new_galaxy_cat_file, 'r') as f_r:
+        for line in f_r:
+            if line[0] == "|" and col_get_flag == 0:
+                col_line = line
+                col_get_flag = 1
+            if line[0] != "\\" and line[0] != "|":
+                break
+            f_w.write(line)
+
+    g1 = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], dtype=int, usecols=0)
+    g2 = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], dtype=float, usecols=[1, 2, 3, 7, 8, 9, 10, 11])
+    g3 = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], dtype=str, usecols=[4, 5, 6])
+
+    g1ind, g2ind, g3ind = 0, 0, 0
+    entry = ''
+    # to force columns to line up with | breaks, each column must be a specific length, the gap
+    # between the various | separators
+    q = np.array([s == "|" for s in col_line])
+    col_inds = np.arange(0, len(col_line))[q]
+    collengths = np.diff(col_inds) - 1
+    dtypes = [int, float, float, float, str, str, str, float, float, float, float, float]
+    for k in xrange(0, len(collengths)):
+        dtype_ = dtypes[k]
+        collength = collengths[k]
+        if dtype_ == int:
+            try:
+                read = int(g1[g1ind])
+            except IndexError:
+                read = int(g1)
+            g1ind += 1
+        elif dtype_ == float:
+            try:
+                read = float(g2[g2ind])
+            except IndexError:
+                read = float(g2)
+            g2ind += 1
+        elif dtype_ == str:
+            try:
+                read = str(g3[g3ind])
+            except IndexError:
+                read = str(g3)
+            g3ind += 1
+        # replace ra/dec, zero-indexed columns 1+2, with random <1 pixel offsets
+        if k == 1 or k == 2:
+            read += pixel_scale/3600 * (-1 + 2 * np.random.random_sample())
+
+        entry = entry + ' {}{}'.format(read, ' ' * (collength - len(str(read))))
+    entry = entry + '\n'
+    f_w.write(entry)
     f_w.close()
 
     half_l_r = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=7)
@@ -154,16 +213,22 @@ for i in xrange(0, ngals):
         star_cat_base, star_cat_ext = os.path.splitext(stellar_cat_file)
         new_stellar_cat_file = star_cat_base + '_single_star' + star_cat_ext
         f_w = open(new_stellar_cat_file, 'w+')
+        col_get_flag = 0
         with open(stellar_cat_file, 'r') as f_r:
             for line in f_r:
+                if line[0] == "|" and col_get_flag == 0:
+                    col_line = line
+                    col_get_flag = 1
                 if line[0] != "\\" and line[0] != "|":
                     break
                 f_w.write(line)
+        # to force columns to line up with | breaks, each column must be a specific length, the gap
+        # between the various | separators
+        q = np.array([s == "|" for s in col_line])
+        col_inds = np.arange(0, len(col_line))[q]
+        collengths = np.diff(col_inds) - 1
+
         entry = ''
-        # to force columns to line up with | breaks, each column must be a specific length, which is
-        # for id, ra, dec, distance, age, metallicity, mass, teff, logg, binary, dataset, absolute and
-        # apparent 8, 17, 17, 17, 17, 11, 17, 14, 12, 6, 7, 14, 12
-        collengths = [8, 17, 17, 17, 17, 11, 17, 14, 12, 6, 7, 14, 12]
         dtypes = [int, float, float, float, int, float, float, float, float, int, int, float, float]
         for k, collength, dtype in zip(g, collengths, dtypes):
             k_ = dtype(k)
@@ -172,6 +237,7 @@ for i in xrange(0, ngals):
         f_w.write(entry)
         f_w.close()
 
+        # TODO: vary exptime to explore the effects of exposure cadence on observation
         seedo = np.random.randint(100000)
         obs = {'instrument': 'WFI',
                'filters': [filters[j].upper()],
@@ -185,7 +251,7 @@ for i in xrange(0, ngals):
                'offsets': [{'offset_id': 1, 'offset_centre': False, 'offset_ra': 0.0, 'offset_dec': 0.0, 'offset_pa': 0.0}],
                'small_subarray': True, 'seed': seedo}
 
-        obm = ObservationModule(obs, logger=logger)
+        obm = ObservationModule(obs, logger=logger, out_path='temp_files')
         obm.nextObservation()
         output_galaxy_catalogues = obm.addCatalogue(new_galaxy_cat_file)
         output_stellar_catalogues = obm.addCatalogue(new_stellar_cat_file)
@@ -200,5 +266,30 @@ for i in xrange(0, ngals):
         ax.imshow(image, origin='lower', cmap='viridis', norm=norm)
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
+        if i == 0:
+            ax.set_title(filters[j].upper())
+
+        # here the shifted galaxy is observed...
+        obm_shifted = ObservationModule(obs, logger=logger, out_path='temp_files')
+        obm_shifted.nextObservation()
+        output_galaxy_catalogues_shifted = obm.addCatalogue(shifted_galaxy_cat_file)
+        # TODO: figure out why image_diff isn't the same shape as image, and see why the
+        # shifted galaxy x/y pixel coordinates is completely off the edge of the subarray
+        psf_file_shifted = obm_shifted.addError()
+        fits_file_shifted, mosaic_file_shifted, params = obm_shifted.finalize(mosaic=False)
+
+        f = pyfits.open(fits_file_shifted)
+        image_shifted = f[1].data
+
+        image_diff = image - image_shifted
+
+        norm = simple_norm(image_diff, 'log', min_percent=35, max_percent=99.95)
+
+        ax = plt.subplot(gs[i, j+nfilts])
+        ax.imshow(image_diff, origin='lower', cmap='viridis', norm=norm)
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+        if i == 0:
+            ax.set_title(filters[j].upper())
 plt.tight_layout()
 plt.savefig('test_galaxy.pdf')

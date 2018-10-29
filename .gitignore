@@ -2,6 +2,10 @@
 */*.pdf
 */*.fits
 */*.tmp
+*/*/*.txt
+*/*/*.pdf
+*/*/*.fits
+*/*/*.tmp
 *.txt
 *.pdf
 *.fits
