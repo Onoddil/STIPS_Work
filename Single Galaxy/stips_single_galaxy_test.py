@@ -39,10 +39,11 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
 ngals = 1
 filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
 nfilts = len(filters)
+nfilts = 1
 pixel_scale = 0.11  # arcsecond/pixel
-gs = gridcreate('111', ngals, 2*nfilts, 0.8, 15)
 
 for i in xrange(0, ngals):
+    gs = gridcreate('111', nfilts, 4, 0.8, 15)
     file_ = open('temp_files/creation_test.log', 'w+')
     stream_handler = logging.StreamHandler(file_)
     stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
@@ -52,7 +53,7 @@ for i in xrange(0, ngals):
 
     scm = SceneModule(logger=logger, out_path='temp_files')
 
-    # assuming surface brightnesses vary between roughly mu_e = 18-23 mag/arcsec^2 (mcgaugh
+    # assuming surface brightnesses vary between roughly mu_e = 20-23 mag/arcsec^2 (mcgaugh
     # 1995, driver 2005)
 
     np.random.seed(seed=None)
@@ -60,7 +61,7 @@ for i in xrange(0, ngals):
     galaxy = {'n_gals': 500,
               'z_low': 0.0, 'z_high': 1.0,
               'rad_low': 0.5, 'rad_high': 2.0,
-              'sb_v_low': 23.0, 'sb_v_high': 18.0,
+              'sb_v_low': 23.0, 'sb_v_high': 20.0,
               'distribution': 'uniform', 'clustered': False,
               'radius': 0.0, 'radius_units': 'arcsec',
               'offset_ra': 0.00001, 'offset_dec': 0.00001, 'seed': seedg}
@@ -173,8 +174,6 @@ for i in xrange(0, ngals):
     sn_model.set(t0=0.0, z=z, x1=0.5, c=0.0)
 
     for j in xrange(0, nfilts):
-        ax = plt.subplot(gs[i, j])
-
         # then we need to load this file and get the redshift z to get the distance for column 3
         # below; set absolute magnitude to -19 and then calculate the apparent magnitude
         g = np.loadtxt(stellar_cat_file, comments=['\\', '|'])
@@ -204,11 +203,10 @@ for i in xrange(0, ngals):
         # if we need the 'star' of absolute magnitude M at distance dl then it has an apparent
         # magnitude of M + dl. thus after creating the source we need to move its distance modulus
         # and apparent magnitude by dM (the difference in absolute magnitudes)
-
         dmu = m_ia - g[12]
         g[12] = g[12] + dmu
         mu_s = 5 * np.log10(g[3]) - 5
-        g[3] = 10**((mu_s + dmu)/5 - 1)
+        g[3] = 10**((mu_s + dmu)/5 + 1)
 
         star_cat_base, star_cat_ext = os.path.splitext(stellar_cat_file)
         new_stellar_cat_file = star_cat_base + '_single_star' + star_cat_ext
@@ -253,6 +251,13 @@ for i in xrange(0, ngals):
 
         obm = ObservationModule(obs, logger=logger, out_path='temp_files')
         obm.nextObservation()
+        #TODO: take ratio/pa fix out of instrument.py and the i_e calculation in astro_image.py
+        #
+        #
+        #
+        #
+        #
+        #
         output_galaxy_catalogues = obm.addCatalogue(new_galaxy_cat_file)
         output_stellar_catalogues = obm.addCatalogue(new_stellar_cat_file)
         psf_file = obm.addError()
@@ -260,36 +265,55 @@ for i in xrange(0, ngals):
 
         f = pyfits.open(fits_file)
         image = f[1].data
+        print "total in final image:", np.sum(image)
+        norm = simple_norm(image, 'log', min_percent=50, max_percent=99.95)
 
-        norm = simple_norm(image, 'log', min_percent=90, max_percent=99.95)
-
-        ax.imshow(image, origin='lower', cmap='viridis', norm=norm)
+        ax = plt.subplot(gs[j, 0])
+        img = ax.imshow(image, origin='lower', cmap='viridis', norm=norm)
+        plt.colorbar(img, ax=ax, use_gridspec=True)
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
         if i == 0:
-            ax.set_title(filters[j].upper())
-
+            ax.set_title('{} Sn Observation'.format(filters[j].upper()))
+        # TODO: why oh why is the count rate of the galaxy observation so high?!
         # here the shifted galaxy is observed...
         obm_shifted = ObservationModule(obs, logger=logger, out_path='temp_files')
         obm_shifted.nextObservation()
-        output_galaxy_catalogues_shifted = obm.addCatalogue(shifted_galaxy_cat_file)
-        # TODO: figure out why image_diff isn't the same shape as image, and see why the
-        # shifted galaxy x/y pixel coordinates is completely off the edge of the subarray
+        output_galaxy_catalogues_shifted = obm_shifted.addCatalogue(shifted_galaxy_cat_file)
         psf_file_shifted = obm_shifted.addError()
         fits_file_shifted, mosaic_file_shifted, params = obm_shifted.finalize(mosaic=False)
 
         f = pyfits.open(fits_file_shifted)
         image_shifted = f[1].data
 
-        image_diff = image - image_shifted
+        image_diff = np.abs(image - image_shifted)
+        image_sign = np.where(image > image_shifted, 1, 0)
 
-        norm = simple_norm(image_diff, 'log', min_percent=35, max_percent=99.95)
-
-        ax = plt.subplot(gs[i, j+nfilts])
-        ax.imshow(image_diff, origin='lower', cmap='viridis', norm=norm)
+        ax = plt.subplot(gs[j, 1])
+        img = ax.imshow(image_shifted, origin='lower', cmap='viridis', norm=norm)
+        plt.colorbar(img, ax=ax, use_gridspec=True)
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
         if i == 0:
-            ax.set_title(filters[j].upper())
-plt.tight_layout()
-plt.savefig('test_galaxy.pdf')
+            ax.set_title('{} Reference'.format(filters[j].upper()))
+
+        norm = simple_norm(image_diff, 'log', min_percent=0.05, max_percent=99.95)
+
+        ax = plt.subplot(gs[j, 2])
+        img = ax.imshow(image_diff, origin='lower', cmap='viridis', norm=norm)
+        plt.colorbar(img, ax=ax, use_gridspec=True)
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+        if i == 0:
+            ax.set_title('{} Difference'.format(filters[j].upper()))
+
+        ax = plt.subplot(gs[j, 3])
+        img = ax.imshow(image_sign, origin='lower', cmap='Greys')
+        plt.colorbar(img, ax=ax, use_gridspec=True)
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+        if i == 0:
+            ax.set_title('{} Difference Sign'.format(filters[j].upper()))
+    plt.tight_layout()
+    plt.savefig('out_gals/galaxy_{}.pdf'.format(i+1))
+    plt.close()
