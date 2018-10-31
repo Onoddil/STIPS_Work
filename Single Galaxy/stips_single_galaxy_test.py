@@ -258,6 +258,30 @@ for i in xrange(0, ngals):
         #
         #
         #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
+        #
         output_galaxy_catalogues = obm.addCatalogue(new_galaxy_cat_file)
         output_stellar_catalogues = obm.addCatalogue(new_stellar_cat_file)
         psf_file = obm.addError()
