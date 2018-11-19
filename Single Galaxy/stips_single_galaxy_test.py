@@ -105,18 +105,87 @@ def new_galaxy_file_creation(galaxy_cat_file):
 
     return new_galaxy_cat_file, shifted_galaxy_cat_file
 
-# TODO: add dithered observation of just galaxy (i.e., move centre by uniform([0, 1])*pixelscale)
-# in sky position to then subsequently subtract from galaxy+supernova observation
+
+def new_star_file_creation(stellar_cat_file, g):
+    star_cat_base, star_cat_ext = os.path.splitext(stellar_cat_file)
+    new_stellar_cat_file = star_cat_base + '_single_star' + star_cat_ext
+    f_w = open(new_stellar_cat_file, 'w+')
+    col_get_flag = 0
+    with open(stellar_cat_file, 'r') as f_r:
+        for line in f_r:
+            if line[0] == "|" and col_get_flag == 0:
+                col_line = line
+                col_get_flag = 1
+            if line[0] != "\\" and line[0] != "|":
+                break
+            f_w.write(line)
+    # to force columns to line up with | breaks, each column must be a specific length, the gap
+    # between the various | separators
+    q = np.array([s == "|" for s in col_line])
+    col_inds = np.arange(0, len(col_line))[q]
+    collengths = np.diff(col_inds) - 1
+
+    entry = ''
+    dtypes = [int, float, float, float, int, float, float, float, float, int, int, float, float]
+    for k, collength, dtype in zip(g, collengths, dtypes):
+        k_ = dtype(k)
+        entry = entry + ' {}{}'.format(k_, ' ' * (collength - len(str(k_))))
+    entry = entry + '\n'
+    f_w.write(entry)
+    f_w.close()
+
+    return new_stellar_cat_file
 
 
-ngals = 10
-filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
-nfilts = len(filters)
-nfilts = 6
-pixel_scale = 0.11  # arcsecond/pixel
-
-for i in xrange(0, ngals):
+def make_figures(filters, img_sn, img_no_sn, diff_img, exptime, directory, counter):
+    nfilts = len(filters)
     gs = gridcreate('111', 3, nfilts, 0.8, 15)
+    for j in xrange(0, nfilts):
+        image = img_sn[j]
+        image_shifted = img_no_sn[j]
+        image_diff = diff_img[j]
+        norm = simple_norm(image / exptime, 'linear', percent=99.9)
+
+        ax = plt.subplot(gs[0, j])
+        img = ax.imshow(image / exptime, origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('Count rate / e$^-$ s$^{-1}$')
+        ax.set_xlabel('x / pixel')
+        if j == 0:
+            ax.set_ylabel('Sn Observation\ny / pixel')
+        else:
+            ax.set_ylabel('y / pixel')
+        ax.set_title(filters[j].upper())
+
+        ax = plt.subplot(gs[1, j])
+        img = ax.imshow(image_shifted / exptime, origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('Count rate / e$^-$ s$^{-1}$')
+        ax.set_xlabel('x / pixel')
+        if j == 0:
+            ax.set_ylabel('Sn Reference\ny / pixel')
+        else:
+            ax.set_ylabel('y / pixel')
+
+        norm = simple_norm(image_diff / exptime, 'linear', percent=99.9)
+
+        ax = plt.subplot(gs[2, j])
+        img = ax.imshow(image_diff / exptime, origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('Count rate / e$^-$ s$^{-1}$')
+        ax.set_xlabel('x / pixel')
+        if j == 0:
+            ax.set_ylabel('Difference\ny / pixel')
+        else:
+            ax.set_ylabel('y / pixel')
+
+    plt.tight_layout()
+    plt.savefig('{}/galaxy_{}.pdf'.format(directory, counter))
+    plt.close()
+
+
+def make_images(filters, pixel_scale, sn_type, times, exptime):
+    nfilts = len(filters)
     file_ = open('temp_files/creation_test.log', 'w+')
     stream_handler = logging.StreamHandler(file_)
     stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
@@ -126,8 +195,8 @@ for i in xrange(0, ngals):
 
     scm = SceneModule(logger=logger, out_path='temp_files')
 
-    # assuming surface brightnesses vary between roughly mu_e = 20-23 mag/arcsec^2 (mcgaugh
-    # 1995, driver 2005)
+    # assuming surface brightnesses vary between roughly mu_e = 18-23 mag/arcsec^2 (mcgaugh
+    # 1995, driver 2005, shen 2003)
 
     np.random.seed(seed=None)
     seedg = np.random.randint(100000)
@@ -202,8 +271,23 @@ for i in xrange(0, ngals):
     # hsiao is valid over a wider wavelength range but has no stretch factor.
     # Hounsell 2017 gives SALT2 models over a wider wavelength range, given as sncosmo source
     # salt2-h17. both salt2 models have phases -20 to +50 days.
-    sn_model = sncosmo.Model('salt2-h17')
-    sn_model.set(t0=0.0, z=z, x1=0.5, c=0.0)
+    if sn_type == 'Ia':
+        sn_model = sncosmo.Model('salt2-h17')
+        sn_model.set(t0=0.0, z=z, x1=0.5, c=0.0)
+    elif sn_type == 'Ib':
+        sn_model = sncosmo.Model('s11-2005hm')
+        sn_model.set(t0=0.0, z=z)
+    elif sn_type == 'Ic':
+        sn_model = sncosmo.Model('s11-2006fo')
+        sn_model.set(t0=0.0, z=z)
+    elif sn_type == 'IIL' or sn_type == 'IIP':
+        sn_model = sncosmo.Model('s11-2004hx')
+        sn_model.set(t0=0.0, z=z)
+    # TODO: add galaxy dust via smcosmo.F99Dust([r_v])
+
+    images_with_sn = []
+    images_without_sn = []
+    diff_images = []
 
     for j in xrange(0, nfilts):
         # then we need to load this file and get the redshift z to get the distance for column 3
@@ -229,8 +313,8 @@ for i in xrange(0, ngals):
         transmission = [d[1] for d in data]
         bandpass = sncosmo.Bandpass(dispersion, transmission, wave_unit=u.micron, name=filters[j])
         sn_model.set_source_peakabsmag(-19.0, bandpass, 'ab')
-        # TODO: change time to uniformly sample time series data
-        m_ia = sn_model.bandmag(bandpass, magsys='ab', time=0)
+        # time should be in days
+        m_ia = sn_model.bandmag(bandpass, magsys='ab', time=time)
 
         # if we need the 'star' of absolute magnitude M at distance dl then it has an apparent
         # magnitude of M + dl. thus after creating the source we need to move its distance modulus
@@ -240,32 +324,7 @@ for i in xrange(0, ngals):
         mu_s = 5 * np.log10(g[3]) - 5
         g[3] = 10**((mu_s + dmu)/5 + 1)
 
-        star_cat_base, star_cat_ext = os.path.splitext(stellar_cat_file)
-        new_stellar_cat_file = star_cat_base + '_single_star' + star_cat_ext
-        f_w = open(new_stellar_cat_file, 'w+')
-        col_get_flag = 0
-        with open(stellar_cat_file, 'r') as f_r:
-            for line in f_r:
-                if line[0] == "|" and col_get_flag == 0:
-                    col_line = line
-                    col_get_flag = 1
-                if line[0] != "\\" and line[0] != "|":
-                    break
-                f_w.write(line)
-        # to force columns to line up with | breaks, each column must be a specific length, the gap
-        # between the various | separators
-        q = np.array([s == "|" for s in col_line])
-        col_inds = np.arange(0, len(col_line))[q]
-        collengths = np.diff(col_inds) - 1
-
-        entry = ''
-        dtypes = [int, float, float, float, int, float, float, float, float, int, int, float, float]
-        for k, collength, dtype in zip(g, collengths, dtypes):
-            k_ = dtype(k)
-            entry = entry + ' {}{}'.format(k_, ' ' * (collength - len(str(k_))))
-        entry = entry + '\n'
-        f_w.write(entry)
-        f_w.close()
+        new_stellar_cat_file = new_star_file_creation(stellar_cat_file, g)
 
         # TODO: vary exptime to explore the effects of exposure cadence on observation
         seedo = np.random.randint(100000)
@@ -277,7 +336,7 @@ for i in xrange(0, ngals):
                'pupil_mask': '',
                'background': 'avg',
                'observations_id': 1,
-               'exptime': 1000,
+               'exptime': exptime,
                'offsets': [{'offset_id': 1, 'offset_centre': False, 'offset_ra': 0.0, 'offset_dec': 0.0, 'offset_pa': 0.0}],
                'small_subarray': True, 'seed': seedo}
 
@@ -292,16 +351,6 @@ for i in xrange(0, ngals):
         f = pyfits.open(fits_file)
         image = f[1].data
 
-        norm = simple_norm(image / obs['exptime'], 'linear', percent=99.9)
-
-        ax = plt.subplot(gs[0, j])
-        img = ax.imshow(image / obs['exptime'], origin='lower', cmap='viridis', norm=norm)
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label('Count rate / e$^-$ s$^{-1}$')
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
-        if i == 0:
-            ax.set_title('{} Sn Observation'.format(filters[j].upper()))
         # here the shifted galaxy is observed...
         obm_shifted = ObservationModule(obs, logger=logger, out_path='temp_files')
         obm_shifted.nextObservation()
@@ -314,34 +363,24 @@ for i in xrange(0, ngals):
 
         image_diff = image - image_shifted
 
-        ax = plt.subplot(gs[1, j])
-        img = ax.imshow(image_shifted / obs['exptime'], origin='lower', cmap='viridis', norm=norm)
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label('Count rate / e$^-$ s$^{-1}$')
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
-        if i == 0:
-            ax.set_title('{} Reference'.format(filters[j].upper()))
+        images_with_sn.append(image)
+        images_without_sn.append(image_shifted)
+        diff_images.append(image_diff)
 
-        norm = simple_norm(image_diff / obs['exptime'], 'linear', percent=99.9)
+    return images_with_sn, images_without_sn, diff_images
 
-        ax = plt.subplot(gs[2, j])
-        img = ax.imshow(image_diff / obs['exptime'], origin='lower', cmap='viridis', norm=norm)
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label('Count rate / e$^-$ s$^{-1}$')
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
-        if i == 0:
-            ax.set_title('{} Difference'.format(filters[j].upper()))
 
-    plt.tight_layout()
-    plt.savefig('out_gals/galaxy_{}.pdf'.format(i+1))
-    plt.close()
+ngals = 1
+pixel_scale = 0.11  # arcsecond/pixel
+directory = 'out_gals'
 
-# from scipy.special import gamma, gammainc
-# bn = 2*n - 1/3
-# x_ = bn * (10**(1/n))  # set this to be 10*re away, which should be enough
-# g = gamma(2*n) * gammainc(2*n, x_)
-# i_e = flux / re**2 / 2 / np.pi / n / np.exp(bn) * bn**(2*n) / g
-# pixel_brightness = flux / (self.oversample*self.oversample)
-# pixel_brightness = pixel_brightness / flux * i_e
+# TODO: vary these parameters
+filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
+exptime = 1000  # seconds
+sn_type = 'Ia'
+time = 0
+
+for i in xrange(0, ngals):
+    images_with_sn, images_without_sn, diff_images = make_images(filters, pixel_scale,
+                                                                 sn_type, times, exptime)
+    make_figures(filters, images_with_sn, images_without_sn, diff_images, exptime, directory, i+1)
