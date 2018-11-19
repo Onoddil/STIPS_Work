@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import logging
 
 from astropy.visualization import simple_norm
+from scipy.special import gammaincinv
 
 from stips.scene_module import SceneModule
 from stips.observation_module import ObservationModule
@@ -32,40 +33,8 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     gs = gridspec.GridSpec(y, x, **kwargs)
     return gs
 
-# TODO: add dithered observation of just galaxy (i.e., move centre by uniform([0, 1])*pixelscale)
-# in sky position to then subsequently subtract from galaxy+supernova observation
 
-
-ngals = 1
-filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
-nfilts = len(filters)
-nfilts = 1
-pixel_scale = 0.11  # arcsecond/pixel
-
-for i in xrange(0, ngals):
-    gs = gridcreate('111', nfilts, 4, 0.8, 15)
-    file_ = open('temp_files/creation_test.log', 'w+')
-    stream_handler = logging.StreamHandler(file_)
-    stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    logger.addHandler(stream_handler)
-
-    scm = SceneModule(logger=logger, out_path='temp_files')
-
-    # assuming surface brightnesses vary between roughly mu_e = 20-23 mag/arcsec^2 (mcgaugh
-    # 1995, driver 2005)
-
-    np.random.seed(seed=None)
-    seedg = np.random.randint(100000)
-    galaxy = {'n_gals': 500,
-              'z_low': 0.0, 'z_high': 1.0,
-              'rad_low': 0.5, 'rad_high': 2.0,
-              'sb_v_low': 23.0, 'sb_v_high': 20.0,
-              'distribution': 'uniform', 'clustered': False,
-              'radius': 0.0, 'radius_units': 'arcsec',
-              'offset_ra': 0.00001, 'offset_dec': 0.00001, 'seed': seedg}
-    galaxy_cat_file = scm.CreateGalaxies(galaxy)
+def new_galaxy_file_creation(galaxy_cat_file):
     gal_cat_base, gal_cat_ext = os.path.splitext(galaxy_cat_file)
     new_galaxy_cat_file = gal_cat_base + '_single_galaxy' + gal_cat_ext
     f_w = open(new_galaxy_cat_file, 'w+')
@@ -134,8 +103,56 @@ for i in xrange(0, ngals):
     f_w.write(entry)
     f_w.close()
 
+    return new_galaxy_cat_file, shifted_galaxy_cat_file
+
+# TODO: add dithered observation of just galaxy (i.e., move centre by uniform([0, 1])*pixelscale)
+# in sky position to then subsequently subtract from galaxy+supernova observation
+
+
+ngals = 10
+filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
+nfilts = len(filters)
+nfilts = 6
+pixel_scale = 0.11  # arcsecond/pixel
+
+for i in xrange(0, ngals):
+    gs = gridcreate('111', 3, nfilts, 0.8, 15)
+    file_ = open('temp_files/creation_test.log', 'w+')
+    stream_handler = logging.StreamHandler(file_)
+    stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.addHandler(stream_handler)
+
+    scm = SceneModule(logger=logger, out_path='temp_files')
+
+    # assuming surface brightnesses vary between roughly mu_e = 20-23 mag/arcsec^2 (mcgaugh
+    # 1995, driver 2005)
+
+    np.random.seed(seed=None)
+    seedg = np.random.randint(100000)
+    galaxy = {'n_gals': 5000,
+              'z_low': 0.0, 'z_high': 1.0,
+              'rad_low': 0.3, 'rad_high': 2.5,
+              'sb_v_low': 23.0, 'sb_v_high': 18.0,
+              'distribution': 'uniform', 'clustered': False,
+              'radius': 0.0, 'radius_units': 'arcsec',
+              'offset_ra': 0.00001, 'offset_dec': 0.00001, 'seed': seedg}
+    galaxy_cat_file = scm.CreateGalaxies(galaxy)
+    new_galaxy_cat_file, shifted_galaxy_cat_file = new_galaxy_file_creation(galaxy_cat_file)
+
     half_l_r = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=7)
-    offset_r = 1.5 * half_l_r
+    disk_type = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=6, dtype=str)
+    e_disk = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=8)
+    pa_disk = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=9)
+    n_type = 4 if disk_type == 'devauc' else 1
+    # L(< R) / Ltot = \gamma(2n, x) / \Gamma(2n); scipy.special.gammainc is lower incomplete over
+    # regular gamma function. Thus gammaincinv is the inverse to gammainc, solving
+    # L(< r) / Ltot = Y, where Y is a large fraction
+    y_frac = 0.75
+    x_ = gammaincinv(2*n_type, y_frac)
+    # however, x = bn * (R/Re)**(1/n), so we have to solve for R now, approximating bn
+    offset_r = (x_ / (2*n_type - 1/3))**n_type * half_l_r
 
     # 'star' will have a distance based on the redshift of the galaxy, given by
     # m - M = \mu = 42.38 - 5 log10(h) + 5 log10(z) + 5 log10(1+z) where h = 0.7
@@ -147,11 +164,26 @@ for i in xrange(0, ngals):
     # is also ~M = -19 -- currently just setting all absolute magnitudes to -19, but could change
     # if needed
 
-    # random offsets for star should be in arcseconds; pixel scale is 0.11 arcsecond/pixel
-    rand_ra = -offset_r + np.random.random_sample() * 2 * offset_r
-    rand_dec = -offset_r + np.random.random_sample() * 2 * offset_r
+    endflag = 0
+    while endflag == 0:
+        # random offsets for star should be in arcseconds; pixel scale is 0.11 arcsecond/pixel
+        rand_ra = -offset_r + np.random.random_sample() * 2 * offset_r
+        rand_dec = -offset_r + np.random.random_sample() * 2 * offset_r
+        # the full equation for a shifted, rotated ellipse, with semi-major axis
+        # originally aligned with the y-axis, is given by:
+        # ((x-p)cos(t)-(y-q)sin(t))**2/b**2 + ((x-p)sin(t) + (y-q)cos(t))**2/a**2 = 1
+        p = galaxy['offset_ra']
+        q = galaxy['offset_dec']
+        x = rand_ra
+        y = rand_dec
+        t = pa_disk
+        a = offset_r
+        b = e_disk * offset_r
+        if ((((x - p) * np.cos(t) - (y - q) * np.sin(t)) / b)**2 +
+                (((x - p) * np.sin(t) + (y - q) * np.cos(t)) / a)**2 <= 1):
+            endflag = 1
 
-    stellar = {'n_stars': 100000,
+    stellar = {'n_stars': 500000,
                'age_low': 1.0e7, 'age_high': 1.0e7,
                'z_low': -2.0, 'z_high': -2.0,
                'imf': 'powerlaw', 'alpha': -0.1,
@@ -249,39 +281,9 @@ for i in xrange(0, ngals):
                'offsets': [{'offset_id': 1, 'offset_centre': False, 'offset_ra': 0.0, 'offset_dec': 0.0, 'offset_pa': 0.0}],
                'small_subarray': True, 'seed': seedo}
 
-        obm = ObservationModule(obs, logger=logger, out_path='temp_files')
+        obm = ObservationModule(obs, logger=logger, out_path='temp_files', noise_floor=0)
         obm.nextObservation()
-        #TODO: take ratio/pa fix out of instrument.py and the i_e calculation in astro_image.py
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
+
         output_galaxy_catalogues = obm.addCatalogue(new_galaxy_cat_file)
         output_stellar_catalogues = obm.addCatalogue(new_stellar_cat_file)
         psf_file = obm.addError()
@@ -289,17 +291,17 @@ for i in xrange(0, ngals):
 
         f = pyfits.open(fits_file)
         image = f[1].data
-        print "total in final image:", np.sum(image)
-        norm = simple_norm(image, 'log', min_percent=50, max_percent=99.95)
 
-        ax = plt.subplot(gs[j, 0])
-        img = ax.imshow(image, origin='lower', cmap='viridis', norm=norm)
-        plt.colorbar(img, ax=ax, use_gridspec=True)
+        norm = simple_norm(image / obs['exptime'], 'linear', percent=99.9)
+
+        ax = plt.subplot(gs[0, j])
+        img = ax.imshow(image / obs['exptime'], origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('Count rate / e$^-$ s$^{-1}$')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
         if i == 0:
             ax.set_title('{} Sn Observation'.format(filters[j].upper()))
-        # TODO: why oh why is the count rate of the galaxy observation so high?!
         # here the shifted galaxy is observed...
         obm_shifted = ObservationModule(obs, logger=logger, out_path='temp_files')
         obm_shifted.nextObservation()
@@ -310,34 +312,36 @@ for i in xrange(0, ngals):
         f = pyfits.open(fits_file_shifted)
         image_shifted = f[1].data
 
-        image_diff = np.abs(image - image_shifted)
-        image_sign = np.where(image > image_shifted, 1, 0)
+        image_diff = image - image_shifted
 
-        ax = plt.subplot(gs[j, 1])
-        img = ax.imshow(image_shifted, origin='lower', cmap='viridis', norm=norm)
-        plt.colorbar(img, ax=ax, use_gridspec=True)
+        ax = plt.subplot(gs[1, j])
+        img = ax.imshow(image_shifted / obs['exptime'], origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('Count rate / e$^-$ s$^{-1}$')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
         if i == 0:
             ax.set_title('{} Reference'.format(filters[j].upper()))
 
-        norm = simple_norm(image_diff, 'log', min_percent=0.05, max_percent=99.95)
+        norm = simple_norm(image_diff / obs['exptime'], 'linear', percent=99.9)
 
-        ax = plt.subplot(gs[j, 2])
-        img = ax.imshow(image_diff, origin='lower', cmap='viridis', norm=norm)
-        plt.colorbar(img, ax=ax, use_gridspec=True)
+        ax = plt.subplot(gs[2, j])
+        img = ax.imshow(image_diff / obs['exptime'], origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('Count rate / e$^-$ s$^{-1}$')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
         if i == 0:
             ax.set_title('{} Difference'.format(filters[j].upper()))
 
-        ax = plt.subplot(gs[j, 3])
-        img = ax.imshow(image_sign, origin='lower', cmap='Greys')
-        plt.colorbar(img, ax=ax, use_gridspec=True)
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
-        if i == 0:
-            ax.set_title('{} Difference Sign'.format(filters[j].upper()))
     plt.tight_layout()
     plt.savefig('out_gals/galaxy_{}.pdf'.format(i+1))
     plt.close()
+
+# from scipy.special import gamma, gammainc
+# bn = 2*n - 1/3
+# x_ = bn * (10**(1/n))  # set this to be 10*re away, which should be enough
+# g = gamma(2*n) * gammainc(2*n, x_)
+# i_e = flux / re**2 / 2 / np.pi / n / np.exp(bn) * bn**(2*n) / g
+# pixel_brightness = flux / (self.oversample*self.oversample)
+# pixel_brightness = pixel_brightness / flux * i_e
