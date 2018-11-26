@@ -243,7 +243,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
     np.random.seed(seed=None)
     seedg = np.random.randint(100000)
     galaxy = {'n_gals': 5000,
-              'z_low': 0.0, 'z_high': 1.0,
+              'z_low': 0.1, 'z_high': 1.0,
               'rad_low': 0.3, 'rad_high': 2.5,
               'sb_v_low': 23.0, 'sb_v_high': 18.0,
               'distribution': 'uniform', 'clustered': False,
@@ -265,16 +265,6 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
     # however, x = bn * (R/Re)**(1/n), so we have to solve for R now, approximating bn
     offset_r = (x_ / (2*n_type - 1/3))**n_type * half_l_r
 
-    # 'star' will have a distance based on the redshift of the galaxy, given by
-    # m - M = \mu = 42.38 - 5 log10(h) + 5 log10(z) + 5 log10(1+z) where h = 0.7
-    # (given by H0 = 100h km/s/Mpc), based on cz = H0d, \mu = 5 log10(dL) - 5, dL = (1+z)d,
-    # and 5log10(c/100km/s/Mpc / pc) = 42.38.
-    # pretending that F125W on WFC3/IR is 2MASS J, we set the absolute magnitude of a
-    # type Ia supernova to J = -19.0 (meikle 2018). set supernova to a star of the closest
-    # blackbody (10000K; Zheng 2017) -- code uses Johnson I magnitude but Phillips (1993) says that
-    # is also ~M = -19 -- currently just setting all absolute magnitudes to -19, but could change
-    # if needed
-
     endflag = 0
     while endflag == 0:
         # random offsets for star should be in arcseconds; pixel scale is 0.11 arcsecond/pixel
@@ -294,7 +284,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
                 (((x - p) * np.sin(t) + (y - q) * np.cos(t)) / a)**2 <= 1):
             endflag = 1
 
-    stellar = {'n_stars': 500000,
+    stellar = {'n_stars': 10000,
                'age_low': 1.0e7, 'age_high': 1.0e7,
                'z_low': -2.0, 'z_high': -2.0,
                'imf': 'powerlaw', 'alpha': -0.1,
@@ -308,6 +298,14 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
     z = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[3])
 
     sn_model = get_sn_model(sn_type, 1, t0=0.0, z=z)
+    # pretending that F125W on WFC3/IR is 2MASS J, we set the absolute magnitude of a
+    # type Ia supernova to J = -19.0 (meikle 2000). set supernova to a star of the closest
+    # blackbody (10000K; Zheng 2017) -- code uses Johnson I magnitude but Phillips (1993) says that
+    # is also ~M = -19 -- currently just setting absolute magnitudes to -19, but could change
+    # if needed
+    # TODO: verfiy the transformation from 2MASS internal zero point -- 3.129E-13Wcm-2um-1 --
+    # to AB -- 31.47E-11 erg s-1 cm-2 A-1 (as per Bessel 1998) -- and how that affects the ZP
+    sn_model.set_source_peakabsmag(-19.0, 'f125w', 'ab')
 
     images_with_sn = []
     images_without_sn = []
@@ -340,22 +338,25 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
             # columns 3 and 12.
             g = g[temp_fit]
 
+            # get the apparent magnitude of the supernova at a given time; first get the
+            # appropriate filter for the observation
+            bandpass = sncosmo.get_bandpass(filters[j])
+            # time should be in days
+            m_ia = sn_model.bandmag(bandpass, magsys='ab', time=time)
+
+            # 'star' will have a distance based on the redshift of the galaxy, given by
+            # m - M = \mu = 42.38 - 5 log10(h) + 5 log10(z) + 5 log10(1+z) where h = 0.7
+            # (given by H0 = 100h km/s/Mpc), based on cz = H0d, \mu = 5 log10(dL) - 5, dL = (1+z)d,
+            # and 5log10(c/100km/s/Mpc / pc) = 42.38.
             # h = 0.7
             # mu = 42.38 - 5 * np.log10(h) + 5 * np.log10(z) + 5 * np.log10(1+z)
             # dl = 10**(mu/5 + 1)
             # M_ia = -19
             # m_ia = M_ia + mu
 
-            # get the apparent magnitude of the supernova at a given time; first get the
-            # appropriate filter for the observation
-            bandpass = sncosmo.get_bandpass(filters[j])
-            sn_model.set_source_peakabsmag(-19.0, bandpass, 'ab')
-            # time should be in days
-            m_ia = sn_model.bandmag(bandpass, magsys='ab', time=time)
-
             # if we need the 'star' of absolute magnitude M at distance dl then it has an apparent
-            # magnitude of M + dl. thus after creating the source we need to move its distance modulus
-            # and apparent magnitude by dM (the difference in absolute magnitudes)
+            # magnitude of M + dl. thus after creating the source we need to move its distance
+            # modulus and apparent magnitude by dM (the difference in absolute magnitudes)
             dmu = m_ia - g[12]
             g[12] = g[12] + dmu
             mu_s = 5 * np.log10(g[3]) - 5
@@ -378,10 +379,10 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
 
             obm = ObservationModule(obs, logger=logger, out_path='temp_files', noise_floor=0)
             obm.nextObservation()
-
             output_galaxy_catalogues = obm.addCatalogue(new_galaxy_cat_file)
             output_stellar_catalogues = obm.addCatalogue(new_stellar_cat_file)
             psf_file = obm.addError()
+
             fits_file, mosaic_file, params = obm.finalize(mosaic=False)
 
             f = pyfits.open(fits_file)
@@ -392,6 +393,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
             obm_shifted.nextObservation()
             output_galaxy_catalogues_shifted = obm_shifted.addCatalogue(shifted_galaxy_cat_file)
             psf_file_shifted = obm_shifted.addError()
+
             fits_file_shifted, mosaic_file_shifted, params = obm_shifted.finalize(mosaic=False)
 
             f = pyfits.open(fits_file_shifted)
@@ -426,10 +428,11 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
     lc_data = [np.array(time_array), np.array(band_array), np.array(flux_array),
                np.array(fluxerr_array), np.array(zp_array), np.array(zpsys_array)]
 
-    return images_with_sn, images_without_sn, diff_images, lc_data, z
+    sn_params = [sn_model['z'], sn_model['t0'], sn_model['x0']]
+    return images_with_sn, images_without_sn, diff_images, lc_data, sn_params
 
 
-def fit_lc(lc_data, sn_types, directory, filters):
+def fit_lc(lc_data, sn_types, directory, filters, counter, figtext):
     for sn_type in sn_types:
         params = ['z', 't0', 'x0']
         if sn_type == 'Ia':
@@ -445,17 +448,25 @@ def fit_lc(lc_data, sn_types, directory, filters):
             z_uppers[i] = z - 0.01
         # set the bounds on z to be at most the smallest of those available by the given filters in
         # the set being fit here
-        bounds = {'z': (0.0, np.amin(z_uppers))}
+        bounds = {'z': (0.0, np.amin(z_uppers)), 'x1': (0, 1)}
+        # x1 and c bounded by 6-sigma regions (x1: x0=0.4, sigma=0.9, c: x0=-0.04, sigma = 0.1)
+        if sn_type == 'Ia':
+            bounds.update({'x1': (-5, 5.8), 'c': (-0.64, 0.56)})
         result, fitted_model = sncosmo.fit_lc(lc_data, sn_model, params, bounds=bounds, minsnr=3)
         print("Number of chi^2 function calls:", result.ncall)
         print("Number of degrees of freedom in fit:", result.ndof)
         print("chi^2 value at minimum:", result.chisq)
         print("model parameters:", result.param_names)
         print("best-fit values:", result.parameters)
-        fig = sncosmo.plot_lc(lc_data, model=fitted_model, errors=result.errors, xfigsize=15,
-                              tighten_ylim=True, ncol=3)
-        fig.savefig('{}/fit_{}.pdf'.format(directory, sn_type))
+        ncol = 3
+        fig = sncosmo.plot_lc(lc_data, model=fitted_model, errors=result.errors, xfigsize=15*ncol,
+                              tighten_ylim=True, ncol=ncol, figtext=figtext)
+        fig.tight_layout()
+        fig.savefig('{}/fit_{}_{}.pdf'.format(directory, counter, sn_type))
 
+
+import warnings
+warnings.simplefilter('ignore', RuntimeWarning)
 
 ngals = 1
 pixel_scale = 0.11  # arcsecond/pixel
@@ -477,13 +488,13 @@ for j in xrange(0, len(filters)):
 exptime = 1000  # seconds
 sn_type = 'Ia'
 
-times = [0, 10]
+times = [-5, 0, 5, 10, 25]
 
 import timeit
 
 for i in xrange(0, ngals):
     start = timeit.default_timer()
-    images_with_sn, images_without_sn, diff_images, lc_data, z_sn = \
+    images_with_sn, images_without_sn, diff_images, lc_data, sn_params = \
         make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp)
     print "make", timeit.default_timer()-start
     start = timeit.default_timer()
@@ -493,6 +504,8 @@ for i in xrange(0, ngals):
     start = timeit.default_timer()
     lc_data_table = Table(data=lc_data, names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
 
+    figtext = 'z = {:.3f}, t0 = {:.1f}, x0 = {:.5f}'.format(*sn_params)
     # TODO: expand to include all types of Sne
-    fit_lc(lc_data_table, [sn_type], directory, filters)
+    fit_lc(lc_data_table, [sn_type], directory, filters, i+1, figtext)
     print "fit", timeit.default_timer()-start
+    print sn_params
