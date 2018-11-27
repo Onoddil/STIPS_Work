@@ -329,8 +329,8 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
         for k in xrange(0, ntimes):
             # TODO: add exposure and readout time so that exposures are staggered in time
             time = times[k]
-            # then we need to load this file and get the redshift z to get the distance for column 3
-            # below; set absolute magnitude to -19 and then calculate the apparent magnitude
+            # then we need to load this file and get the redshift z to get the distance for column
+            # 3 below, and then calculate the apparent magnitude
             g = np.loadtxt(stellar_cat_file, comments=['\\', '|'])
             temp_fit = np.argmin(np.abs(g[:, 7] - 10000))
 
@@ -409,7 +409,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
             band_array.append(filters[j])
 
             xind, yind = np.unravel_index(np.argmax(image_diff), image_diff.shape)
-            N = 20
+            N = 10
 
             # current naive sum the entire (box) 'aperture' flux of the Sn
             diff_sum = np.sum(image_diff[xind-N:xind+N+1, yind-N:yind+N+1])
@@ -474,7 +474,8 @@ directory = 'out_gals'
 
 # TODO: vary these parameters
 filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
-filt_zp = [26.39, 26.41, 27.50, 26.35, 26.41, 25.96]  # 1 count/s for infinite aperture, hounsell17
+# 1 count/s for infinite aperture, hounsell17, AB magnitudes
+filt_zp = [26.39, 26.41, 27.50, 26.35, 26.41, 25.96]
 
 for j in xrange(0, len(filters)):
     f = pyfits.open('../../pandeia_data-1.0/wfirst/wfirstimager/filters/{}.fits'.format(filters[j]))
@@ -488,10 +489,10 @@ for j in xrange(0, len(filters)):
 exptime = 1000  # seconds
 sn_type = 'Ia'
 
-times = [-5, 0, 5, 10, 25]
+times = [-10, 0, 10, 20, 30]
 
 import timeit
-
+# TODO: see about downloading the jwst_backgrounds cache and putting it somewhere for offline use?
 for i in xrange(0, ngals):
     start = timeit.default_timer()
     images_with_sn, images_without_sn, diff_images, lc_data, sn_params = \
@@ -503,7 +504,7 @@ for i in xrange(0, ngals):
     print "plot", timeit.default_timer()-start
     start = timeit.default_timer()
     lc_data_table = Table(data=lc_data, names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
-
+    print lc_data_table['flux']
     figtext = 'z = {:.3f}, t0 = {:.1f}, x0 = {:.5f}'.format(*sn_params)
     # TODO: expand to include all types of Sne
     fit_lc(lc_data_table, [sn_type], directory, filters, i+1, figtext)
