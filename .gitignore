@@ -13,3 +13,4 @@
 .DS_Store
 */.DS_Store
 !salt2-guy2010-parameters.txt
+*/*.lprof
