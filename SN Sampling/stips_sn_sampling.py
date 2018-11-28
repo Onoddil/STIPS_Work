@@ -24,6 +24,11 @@ from stips.observation_module import ObservationModule
 import sncosmo
 import astropy.units as u
 
+try:
+    profile
+except NameError:
+    profile = lambda x: x
+
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
     # Function that creates a blank axis canvas; each figure gets a name (or alternatively a number
@@ -35,8 +40,6 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     return gs
 
 
-# TODO: update this calculation to take into account that we always have to make filt reference
-# images, but obs sn+galaxy images, so we really have 1+obs creation runs
 def model_number(run_minutes, run_n, run_obs, n_runs):
     n = 7  # including R, eventually
     t = 50
@@ -54,12 +57,104 @@ def model_number(run_minutes, run_n, run_obs, n_runs):
     # finally, scale by n_runs for each cadence/filter combination
     for c in cadences:
         for k in np.arange(2, n+1):
-            time += np.math.factorial(n) / (np.math.factorial(k) * np.math.factorial(n - k)) * (k /
-                run_n) * run_minutes * (t / c / run_obs) * n_runs
+            # we always have to make filt reference images, but obs sn+galaxy images, so we really
+            # have 1+obs creation runs
+            time += np.math.factorial(n) / (np.math.factorial(k) * np.math.factorial(n - k)) * (
+                (1+k) / (1+run_n)) * run_minutes * (t / c / run_obs) * n_runs
 
     n_tot = n_filt_choice * n_cadence
 
     print "{} choices, {:.0f}/{:.0f}/{:.0f} approximate minutes/hours/days".format(n_tot, time, time/60, time/60/24)
+
+
+def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
+    nfilts = len(filters)
+    file_ = open('temp_files/creation_test.log', 'w+')
+    stream_handler = logging.StreamHandler(file_)
+    stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.addHandler(stream_handler)
+
+    scm = SceneModule(logger=logger, out_path='temp_files')
+    np.random.seed(seed=None)
+    seedg = np.random.randint(100000)
+    galaxy = {'n_gals': 5000,
+              'z_low': 0.1, 'z_high': 1.0,
+              'rad_low': 0.3, 'rad_high': 2.5,
+              'sb_v_low': 23.0, 'sb_v_high': 18.0,
+              'distribution': 'uniform', 'clustered': False,
+              'radius': 0.0, 'radius_units': 'arcsec',
+              'offset_ra': 0.00001, 'offset_dec': 0.00001, 'seed': seedg}
+    galaxy_cat_file = scm.CreateGalaxies(galaxy)
+    new_galaxy_cat_file, shifted_galaxy_cat_file = new_galaxy_file_creation(galaxy_cat_file)
+    obs = {'instrument': 'WFI',
+           'filters': [p.upper() for p in filters],
+           'detectors': 1,
+           'distortion': False,
+           'oversample': 5,
+           'pupil_mask': '',
+           'background': 'none',  # temporary to allow for comparison with tests, should be avg
+           'observations_id': 1,
+           'exptime': exptime,
+           'offsets': [{'offset_id': 1, 'offset_centre': False, 'offset_ra': 0.0, 'offset_dec': 0.0, 'offset_pa': 0.0}],
+           'small_subarray': True, 'seed': seedo}
+    obm_shifted = ObservationModule(obs, logger=logger, out_path='temp_files')
+
+    disk_type = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[6], dtype=str)
+    loading = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[1, 2, 3, 7, 8, 9, 11])
+    ra, dec, z, half_l_r, e_disk, pa_disk, mu = loading
+    n_type = 4 if disk_type == 'devauc' else 1
+    cm_exp = [0.00077, 0.01077, 0.07313, 0.37188, 1.39727, 3.56054, 4.74340, 1.78732]
+    vm_exp_sqrt = [0.78732, 0.06490, 0.13580, 0.25096, 0.42942, 0.69672, 1.08879, 1.67294]
+    cm_dev = [0.00139, 0.00941, 0.04441, 0.16162, 0.48121, 1.20357, 2.54182, 4.46441, 6.22821,
+              6.15393]
+    vm_dev_sqrt = [0.00087, 0.00296, 0.00792, 0.01902, 0.04289, 0.09351, 0.20168, 0.44126,
+                   1.01833, 2.74555]
+    pks = np.array([1])
+    Vk_real = np.array([[[0.13, 0], [0, 0.13]]])
+    mks = np.array([[[0], [0]]])
+    Vks = vk_real / half_l_r
+
+    cms = cm_dev if disk_type == 'devauc' else cm_exp
+    # Vm is always circular so this doesn't need to be a full matrix, but PSF m/V do need to
+    vms = np.array(vm_dev_sqrt)**2 if disk_type == 'devauc' else np.array(vm_exp_sqrt)**2
+
+    # 0.75 mag is really 2.5 * log10(2), for double flux, given area is half-light radius
+    mag = mu - 2.5 * np.log10(np.pi * half_l_r**2 * e_disk) - 2.5 * np.log10(2)
+
+    a = half_l_r
+    b = e_disk * half_l_r
+    t = pa_disk
+    Rg = np.array([[-a * np.sin(t), b * np.cos(t)], [a * np.cos(t), b * np.sin(t)]])
+    Vgm_unit = np.dot(Rg, np.transpose(Rg))
+    for j in xrange(0, len(filters)):
+        obm_shifted.nextObservation()
+        output_galaxy_catalogues_shifted = obm_shifted.addCatalogue(shifted_galaxy_cat_file)
+        # psf_file_shifted = obm_shifted.addError(parallel=True)
+        fits_file_shifted, mosaic_file_shifted, params = obm_shifted.finalize(mosaic=False)
+        f = pyfits.open(fits_file_shifted)
+        image_full = f[1].data
+
+        xg = np.array([[ra / pixel_scale + image_full.shape[0]/2],
+                       [dec / pixel_scale + image_full.shape[1]/2]])
+        # total flux in galaxy
+        Sg = 10**(-1/2.5 * (m - filt_zp[j]))
+        for k in xrange(0, len(mks)):
+            pk = pks[k]
+            Vk = Vks[k]
+            for m in xrange(0, len(vms)):
+                cm = cms[m]
+                vm = vms[m]
+                # Vgm = RVR^T = v RR^T given that V = vI
+                Vgm = vm * Vgm_unit
+
+                m = mk + xg
+                v = Vgm + Vk
+                Sg * cm * pk * # normal distribution with new mean and covariance
+
+
+    
 
 
 def new_galaxy_file_creation(galaxy_cat_file):
@@ -270,7 +365,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
     np.random.seed(seed=None)
     seedg = np.random.randint(100000)
     galaxy = {'n_gals': 5000,
-              'z_low': 0.1, 'z_high': 1.0,
+              'z_low': 0.2, 'z_high': 1.0,
               'rad_low': 0.3, 'rad_high': 2.5,
               'sb_v_low': 23.0, 'sb_v_high': 18.0,
               'distribution': 'uniform', 'clustered': False,
@@ -472,216 +567,6 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
     return images_with_sn, images_without_sn, diff_images, lc_data, sn_params
 
 
-def make_images_old(filters, pixel_scale, sn_type, times, exptime, filt_zp):
-    nfilts = len(filters)
-    ntimes = len(times)
-
-    file_ = open('temp_files/creation_test.log', 'w+')
-    stream_handler = logging.StreamHandler(file_)
-    stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    logger.addHandler(stream_handler)
-
-    scm = SceneModule(logger=logger, out_path='temp_files')
-
-    # assuming surface brightnesses vary between roughly mu_e = 18-23 mag/arcsec^2 (mcgaugh
-    # 1995, driver 2005, shen 2003)
-
-    np.random.seed(seed=None)
-    seedg = np.random.randint(100000)
-    galaxy = {'n_gals': 5000,
-              'z_low': 0.1, 'z_high': 1.0,
-              'rad_low': 0.3, 'rad_high': 2.5,
-              'sb_v_low': 23.0, 'sb_v_high': 18.0,
-              'distribution': 'uniform', 'clustered': False,
-              'radius': 0.0, 'radius_units': 'arcsec',
-              'offset_ra': 0.00001, 'offset_dec': 0.00001, 'seed': seedg}
-    galaxy_cat_file = scm.CreateGalaxies(galaxy)
-    new_galaxy_cat_file, shifted_galaxy_cat_file = new_galaxy_file_creation(galaxy_cat_file)
-
-    half_l_r = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[7])
-    disk_type = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[6], dtype=str)
-    e_disk = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[8])
-    pa_disk = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[9])
-    n_type = 4 if disk_type == 'devauc' else 1
-    # L(< R) / Ltot = \gamma(2n, x) / \Gamma(2n); scipy.special.gammainc is lower incomplete over
-    # regular gamma function. Thus gammaincinv is the inverse to gammainc, solving
-    # L(< r) / Ltot = Y, where Y is a large fraction
-    y_frac = 0.75
-    x_ = gammaincinv(2*n_type, y_frac)
-    # however, x = bn * (R/Re)**(1/n), so we have to solve for R now, approximating bn
-    offset_r = (x_ / (2*n_type - 1/3))**n_type * half_l_r
-
-    endflag = 0
-    while endflag == 0:
-        # random offsets for star should be in arcseconds; pixel scale is 0.11 arcsecond/pixel
-        rand_ra = -offset_r + np.random.random_sample() * 2 * offset_r
-        rand_dec = -offset_r + np.random.random_sample() * 2 * offset_r
-        # the full equation for a shifted, rotated ellipse, with semi-major axis
-        # originally aligned with the y-axis, is given by:
-        # ((x-p)cos(t)-(y-q)sin(t))**2/b**2 + ((x-p)sin(t) + (y-q)cos(t))**2/a**2 = 1
-        p = galaxy['offset_ra']
-        q = galaxy['offset_dec']
-        x = rand_ra
-        y = rand_dec
-        t = pa_disk
-        a = offset_r
-        b = e_disk * offset_r
-        if ((((x - p) * np.cos(t) - (y - q) * np.sin(t)) / b)**2 +
-                (((x - p) * np.sin(t) + (y - q) * np.cos(t)) / a)**2 <= 1):
-            endflag = 1
-
-    stellar = {'n_stars': 10000,
-               'age_low': 1.0e7, 'age_high': 1.0e7,
-               'z_low': -2.0, 'z_high': -2.0,
-               'imf': 'powerlaw', 'alpha': -0.1,
-               'binary_fraction': 0.0,
-               'distribution': 'invpow', 'clustered': True,
-               'radius': 0.0, 'radius_units': 'pc',
-               'distance_low': 20.0, 'distance_high': 20.0,
-               'offset_ra': rand_ra, 'offset_dec': rand_dec}
-    stellar_cat_file = scm.CreatePopulation(stellar)
-
-    z = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[3])
-
-    sn_model = get_sn_model(sn_type, 1, t0=0.0, z=z)
-    # pretending that F125W on WFC3/IR is 2MASS J, we set the absolute magnitude of a
-    # type Ia supernova to J = -19.0 (meikle 2000). set supernova to a star of the closest
-    # blackbody (10000K; Zheng 2017) -- code uses Johnson I magnitude but Phillips (1993) says that
-    # is also ~M = -19 -- currently just setting absolute magnitudes to -19, but could change
-    # if needed
-    # TODO: verfiy the transformation from 2MASS internal zero point -- 3.129E-13Wcm-2um-1 --
-    # to AB -- 31.47E-11 erg s-1 cm-2 A-1 (as per Bessel 1998) -- and how that affects the ZP
-    sn_model.set_source_peakabsmag(-19.0, 'f125w', 'ab')
-
-    images_with_sn = []
-    images_without_sn = []
-    diff_images = []
-
-    # things that are needed to create the astropy.table.Table for use in fit_lc:
-    # time, band (name, see registered bandpasses), flux, fluxerr [both just derived from an
-    # image somehow], zp, zpsys [zeropoint and name of system]
-
-    time_array = []
-    band_array = []
-    flux_array = []
-    fluxerr_array = []
-    zp_array = []
-    zpsys_array = []
-
-    # then we need to load this file and get the redshift z to get the distance for column
-    # 3 below, and then calculate the apparent magnitude
-    g_orig = np.loadtxt(stellar_cat_file, comments=['\\', '|'])
-    temp_fit = np.argmin(np.abs(g_orig[:, 7] - 10000))
-    g_orig = g_orig[temp_fit]
-
-    for j in xrange(0, nfilts):
-        images = []
-        images_shifted = []
-        images_diff = []
-        for k in xrange(0, ntimes):
-            # TODO: add exposure and readout time so that exposures are staggered in time
-            time = times[k]
-
-            # We need to change the distance and apparent magnitude, so edit (zero-indexed)
-            # columns 3 and 12.
-            g = g_orig.copy()
-            # get the apparent magnitude of the supernova at a given time; first get the
-            # appropriate filter for the observation
-            bandpass = sncosmo.get_bandpass(filters[j])
-            # time should be in days
-            m_ia = sn_model.bandmag(bandpass, magsys='ab', time=time)
-
-            # 'star' will have a distance based on the redshift of the galaxy, given by
-            # m - M = \mu = 42.38 - 5 log10(h) + 5 log10(z) + 5 log10(1+z) where h = 0.7
-            # (given by H0 = 100h km/s/Mpc), based on cz = H0d, \mu = 5 log10(dL) - 5, dL = (1+z)d,
-            # and 5log10(c/100km/s/Mpc / pc) = 42.38.
-            # h = 0.7
-            # mu = 42.38 - 5 * np.log10(h) + 5 * np.log10(z) + 5 * np.log10(1+z)
-            # dl = 10**(mu/5 + 1)
-            # M_ia = -19
-            # m_ia = M_ia + mu
-
-            # if we need the 'star' of absolute magnitude M at distance dl then it has an apparent
-            # magnitude of M + dl. thus after creating the source we need to move its distance
-            # modulus and apparent magnitude by dM (the difference in absolute magnitudes)
-            dmu = m_ia - g[12]
-            g[12] = g[12] + dmu
-            mu_s = 5 * np.log10(g[3]) - 5
-            g[3] = 10**((mu_s + dmu)/5 + 1)
-
-            new_stellar_cat_file = new_star_file_creation(stellar_cat_file, g)
-
-            seedo = np.random.randint(100000)
-            obs = {'instrument': 'WFI',
-                   'filters': [filters[j].upper()],
-                   'detectors': 1,
-                   'distortion': False,
-                   'oversample': 5,
-                   'pupil_mask': '',
-                   'background': 'avg',
-                   'observations_id': 1,
-                   'exptime': exptime,
-                   'offsets': [{'offset_id': 1, 'offset_centre': False, 'offset_ra': 0.0, 'offset_dec': 0.0, 'offset_pa': 0.0}],
-                   'small_subarray': True, 'seed': seedo}
-
-            obm = ObservationModule(obs, logger=logger, out_path='temp_files', noise_floor=0)
-            obm.nextObservation()
-            output_galaxy_catalogues = obm.addCatalogue(new_galaxy_cat_file)
-            output_stellar_catalogues = obm.addCatalogue(new_stellar_cat_file)
-            psf_file = obm.addError(parallel=True)
-
-            fits_file, mosaic_file, params = obm.finalize(mosaic=False)
-
-            f = pyfits.open(fits_file)
-            image = f[1].data
-
-            # here the shifted galaxy is observed...
-            obm_shifted = ObservationModule(obs, logger=logger, out_path='temp_files')
-            obm_shifted.nextObservation()
-            output_galaxy_catalogues_shifted = obm_shifted.addCatalogue(shifted_galaxy_cat_file)
-            psf_file_shifted = obm_shifted.addError(parallel=True)
-
-            fits_file_shifted, mosaic_file_shifted, params = obm_shifted.finalize(mosaic=False)
-
-            f = pyfits.open(fits_file_shifted)
-            image_shifted = f[1].data
-
-            image_diff = image - image_shifted
-
-            images.append(image)
-            images_shifted.append(image_shifted)
-            images_diff.append(image_diff)
-
-            time_array.append(time)
-            band_array.append(filters[j])
-
-            xind, yind = np.unravel_index(np.argmax(image_diff), image_diff.shape)
-            N = 10
-
-            # current naive sum the entire (box) 'aperture' flux of the Sn, correcting for
-            # exposure time in both counts and uncertainty
-            diff_sum = np.sum(image_diff[xind-N:xind+N+1, yind-N:yind+N+1]) / exptime
-            diff_sum_err = np.sqrt(np.sum(image[xind-N:xind+N+1, yind-N:yind+N+1] +
-                                   image_shifted[xind-N:xind+N+1, yind-N:yind+N+1])) / exptime
-            flux_array.append(diff_sum)
-            fluxerr_array.append(diff_sum_err)
-            zp_array.append(filt_zp[j])  # filter-specific zeropoint
-            # TODO: swap to STmag from the AB system
-            zpsys_array.append('ab')
-
-        images_with_sn.append(images)
-        images_without_sn.append(images_shifted)
-        diff_images.append(images_diff)
-
-    lc_data = [np.array(time_array), np.array(band_array), np.array(flux_array),
-               np.array(fluxerr_array), np.array(zp_array), np.array(zpsys_array)]
-
-    sn_params = [sn_model['z'], sn_model['t0'], sn_model['x0']]
-    return images_with_sn, images_without_sn, diff_images, lc_data, sn_params
-
-
 def fit_lc(lc_data, sn_types, directory, filters, counter, figtext):
     for sn_type in sn_types:
         params = ['z', 't0', 'x0']
@@ -724,11 +609,11 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext):
         fig.savefig('{}/fit_{}_{}.pdf'.format(directory, counter, sn_type))
 
 
-# run_mins, run_n, run_obs, n_runs = 3, 6, 5, 100
-# model_number(run_mins, run_n, run_obs, n_runs)
+run_mins, run_n, run_obs, n_runs = 2, 6, 5, 100
+model_number(run_mins, run_n, run_obs, n_runs)
 
 
-# sys.exit()
+sys.exit()
 
 # TODO: track down the zero point changes in STIPS? one seems to be in pandeia somewhere
 import warnings
