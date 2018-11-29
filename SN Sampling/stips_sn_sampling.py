@@ -67,6 +67,16 @@ def model_number(run_minutes, run_n, run_obs, n_runs):
     print "{} choices, {:.0f}/{:.0f}/{:.0f} approximate minutes/hours/days".format(n_tot, time, time/60, time/60/24)
 
 
+def gaussian_2d(x, x_t, mu, mu_t, sigma):
+    det_sig = np.linalg.det(sigma)
+    print x.shape, x_t.shape, mu.shape, mu_t.shape
+    print (x_t - mu_t).shape
+    p = np.matmul(x_t - mu_t, np.linalg.inv(sigma))
+    mal_dist_sq = np.matmul(p, (x - mu))
+    gauss_pdf = np.exp(-0.5 * mal_dist_sq) / (2 * np.pi) * np.sqrt(det_sig)
+    return gauss_pdf
+
+
 def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
     nfilts = len(filters)
     file_ = open('temp_files/creation_test.log', 'w+')
@@ -79,6 +89,7 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
     scm = SceneModule(logger=logger, out_path='temp_files')
     np.random.seed(seed=None)
     seedg = np.random.randint(100000)
+    seedo = np.random.randint(100000)
     galaxy = {'n_gals': 5000,
               'z_low': 0.1, 'z_high': 1.0,
               'rad_low': 0.3, 'rad_high': 2.5,
@@ -114,7 +125,7 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
     pks = np.array([1])
     Vk_real = np.array([[[0.13, 0], [0, 0.13]]])
     mks = np.array([[[0], [0]]])
-    Vks = vk_real / half_l_r
+    Vks = Vk_real / half_l_r
 
     cms = cm_dev if disk_type == 'devauc' else cm_exp
     # Vm is always circular so this doesn't need to be a full matrix, but PSF m/V do need to
@@ -127,7 +138,10 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
     b = e_disk * half_l_r
     t = pa_disk
     Rg = np.array([[-a * np.sin(t), b * np.cos(t)], [a * np.cos(t), b * np.sin(t)]])
-    Vgm_unit = np.dot(Rg, np.transpose(Rg))
+    Vgm_unit = np.matmul(Rg, np.transpose(Rg))
+
+    gs = gridcreate('adsq', 3, len(filters), 0.8, 15)
+
     for j in xrange(0, len(filters)):
         obm_shifted.nextObservation()
         output_galaxy_catalogues_shifted = obm_shifted.addCatalogue(shifted_galaxy_cat_file)
@@ -136,25 +150,45 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
         f = pyfits.open(fits_file_shifted)
         image_full = f[1].data
 
-        xg = np.array([[ra / pixel_scale + image_full.shape[0]/2],
-                       [dec / pixel_scale + image_full.shape[1]/2]])
+        image_test = np.zeros_like(image_full)
+        x_cent, y_cent = np.ceil(image_test.shape[0])/2, np.ceil(image_test.shape[1])/2
+        xg = np.array([[ra / pixel_scale + x_cent],
+                       [dec / pixel_scale + y_cent]])
+        x_pix = (np.arange(0, image_test.shape[0]) + x_cent) * pixel_scale / half_l_r
+        y_pix = (np.arange(0, image_test.shape[1]) + y_cent) * pixel_scale / half_l_r
+        x, y = np.meshgrid(y_pix, x_pix)
+        # this array has shape (2, 1, y, x), and if we transpose it it'll have shape (x, y, 1, 2)
+        coords = np.transpose(np.array([[x], [y]]))
+        # the "transpose" of the vector x turns from being a column vector (shape = (1, 2)) to a
+        # row vector (shape = (2, 1)), but should still have external shape (x, y), so we start
+        # with vector of (1, 2, y, x) and transpose again
+        coords_t = np.transpose(np.array([[x, y]]))
         # total flux in galaxy
-        Sg = 10**(-1/2.5 * (m - filt_zp[j]))
+        Sg = 10**(-1/2.5 * (mag - filt_zp[j]))
         for k in xrange(0, len(mks)):
             pk = pks[k]
             Vk = Vks[k]
+            mk = mks[k]
             for m in xrange(0, len(vms)):
                 cm = cms[m]
                 vm = vms[m]
                 # Vgm = RVR^T = v RR^T given that V = vI
                 Vgm = vm * Vgm_unit
-
-                m = mk + xg
+                m = (mk + xg).reshape(1, 1, 1, 2)
+                m_t = m.reshape(1, 1, 2, 1)
                 v = Vgm + Vk
-                Sg * cm * pk * # normal distribution with new mean and covariance
+                image_test += Sg * cm * pk * gaussian_2d(coords, coords_t, m, m_t, v)
 
-
-    
+        for k, im, name in enumerate(zip([image_full, image_test, image_full/(image_full+image_test)], ['full', 'test', 'full / (full + test)'])):
+            ax = plt.subplot(gs[k, j])
+            norm = simple_norm(im, 'linear', percent=99.9)
+            img = ax.imshow(im, origin='lower', cmap='viridis', norm=norm)
+            cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+            cb.set_label('Counts / e$^-$')
+            ax.set_xlabel('x / pixel')
+            ax.set_ylabel('y / pixel')
+    plt.tight_layout()
+    plt.savefig('out_gals/test_MoG.pdf')
 
 
 def new_galaxy_file_creation(galaxy_cat_file):
@@ -609,11 +643,10 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext):
         fig.savefig('{}/fit_{}_{}.pdf'.format(directory, counter, sn_type))
 
 
-run_mins, run_n, run_obs, n_runs = 2, 6, 5, 100
-model_number(run_mins, run_n, run_obs, n_runs)
+# run_mins, run_n, run_obs, n_runs = 2, 6, 5, 100
+# model_number(run_mins, run_n, run_obs, n_runs)
 
-
-sys.exit()
+# sys.exit()
 
 # TODO: track down the zero point changes in STIPS? one seems to be in pandeia somewhere
 import warnings
@@ -641,6 +674,10 @@ exptime = 1000  # seconds
 sn_type = 'Ia'
 
 times = [-10, 0, 10, 20, 30]
+
+mog_galaxy_test(filters, pixel_scale, exptime, filt_zp)
+
+sys.exit()
 
 import timeit
 # TODO: see about downloading the jwst_backgrounds cache and putting it somewhere for offline use?
