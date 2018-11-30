@@ -17,6 +17,7 @@ import logging
 from astropy.visualization import simple_norm
 from scipy.special import gammaincinv
 from astropy.table import Table
+from scipy.optimize import basinhopping
 
 from stips.scene_module import SceneModule
 from stips.observation_module import ObservationModule
@@ -65,6 +66,92 @@ def model_number(run_minutes, run_n, run_obs, n_runs):
     n_tot = n_filt_choice * n_cadence
 
     print "{} choices, {:.0f}/{:.0f}/{:.0f} approximate minutes/hours/days".format(n_tot, time, time/60, time/60/24)
+
+
+def psf_fit_jac(p, x, y, z):
+    mu_xs, mu_ys, sigmas, cks = [p[0+i*4] for i in xrange(0, int(len(p)/4))], \
+                                [p[1+i*4] for i in xrange(0, int(len(p)/4))], \
+                                [p[2+i*4] for i in xrange(0, int(len(p)/4))], \
+                                [p[3+i*4] for i in xrange(0, int(len(p)/4))]
+    jac = np.empty(len(p), float)
+    jac_sub = np.empty_like(jac)
+    for i in xrange(0, len(p)):
+        i_set = i // 4
+        i_in = i % 4
+        mu_x, mu_y, sigma, ck = mu_xs[i_set], mu_ys[i_set], sigmas[i_set], cks[i_set]
+
+
+def psf_fit_model(mu_xs, mu_ys, sigmas, cks, x, y):
+    model_z = np.zeros((len(x), len(y)), float)
+    for mu_x, mu_y, sigma, ck in zip(mu_xs, mu_ys, sigmas, cks):
+        x_ = (x - mu_x).reshape(-1, 1)
+        y_ = (y - mu_y).reshape(1, -1)
+        model_z = model_z + ck/(2 * np.pi * sigma) * np.exp(-0.5 * (x_**2 + y_**2) / sigma**2)
+    return model_z
+
+
+def psf_fit_min(p, x, y, z):
+    mu_xs, mu_ys, sigmas, cks = [p[0+i*4] for i in xrange(0, int(len(p)/4))], \
+                                [p[1+i*4] for i in xrange(0, int(len(p)/4))], \
+                                [p[2+i*4] for i in xrange(0, int(len(p)/4))], \
+                                [p[3+i*4] for i in xrange(0, int(len(p)/4))]
+    model_z = psf_fit_model(mu_xs, mu_ys, sigmas, cks, x, y)
+    return np.sum((model_z - z)**2)
+
+
+def psf_mog_fitting(psf_names, pixel_scale):
+    psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
+    gs = gridcreate('adsq', 3, len(psf_names), 0.8, 15)
+    for j in xrange(0, len(psf_names)):
+        f = pyfits.open(psf_names[j])
+        psf_image = f[0].data[4, :, :]
+        from photutils import IntegratedGaussianPRF
+        psf_image = np.zeros((119, 119), float)
+        sigma = 0.13 / pixel_scale / (2 * np.sqrt(2 * np.log(2)))
+        x0, y0 = (psf_image.shape[0] - 1) / 2, (psf_image.shape[1] - 1) / 2
+        psf_model = IntegratedGaussianPRF(sigma=sigma, x_0=x0, y_0=y0, flux=1)
+        x_, y_ = np.meshgrid(np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1]),
+                             indexing='ij')
+        psf_image += psf_model(x_, y_)
+        ax = plt.subplot(gs[0, j])
+        norm = simple_norm(psf_image, 'log', percent=99.9)
+        img = ax.imshow(psf_image, origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('PSF Response')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+
+        x, y = np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1])
+        min_kwarg = {'method': 'newton-cg', 'args': (x, y, psf_image), 'jac': psf_fit_jac,
+                     'hess': psf_fit_hess}
+        x_cent, y_cent = np.ceil((psf_image.shape[0]-1)/2), np.ceil((psf_image.shape[1]-1)/2)
+        res = basinhopping(psf_fit_min, [x_cent, y_cent, 1, 1, x_cent, y_cent, 1, 0],
+                           minimizer_kwargs=min_kwarg, niter=500, T=5)
+        p = res.x
+        mx, my, s, c = [p[0+i*4] for i in xrange(0, int(len(p)/4))], \
+                       [p[1+i*4] for i in xrange(0, int(len(p)/4))], \
+                       [p[2+i*4] for i in xrange(0, int(len(p)/4))], \
+                       [p[3+i*4] for i in xrange(0, int(len(p)/4))]
+        print mx, my, s, c
+        psf_fit = psf_fit_model(mx, my, s, c, x, y)
+        ax = plt.subplot(gs[1, j])
+        norm = simple_norm(psf_fit, 'log', percent=99.9)
+        img = ax.imshow(psf_fit, origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('PSF Response')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+        ax = plt.subplot(gs[2, j])
+        norm = simple_norm((psf_fit - psf_image) / psf_image, 'linear', percent=90)
+        img = ax.imshow((psf_fit - psf_image)/psf_image, origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('Relative difference')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+
+
+    plt.tight_layout()
+    plt.savefig('out_gals/test_psf_mog.pdf')
 
 
 def gaussian_2d(x, x_t, mu, mu_t, sigma):
@@ -161,16 +248,17 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
         psf_file_shifted = obm_shifted.addError(convolve=False, parallel=False)
         fits_file_shifted, mosaic_file_shifted, params = obm_shifted.finalize(mosaic=False)
         f = pyfits.open(fits_file_shifted)
-        image_full = f[1].data / exptime + 1e-8
+        image_full = f[1].data / exptime  # + 1e-8
         full_time += timeit.default_timer()-start
 
         start = timeit.default_timer()
         image_test = np.zeros_like(image_full)
-        x_cent, y_cent = np.ceil(image_test.shape[0])/2, np.ceil(image_test.shape[1])/2
+        x_cent, y_cent = np.ceil((image_test.shape[0]-1)/2), np.ceil((image_test.shape[1]-1)/2)
         # positons should be in dimensionless but physical coordinates in terms of Re; first the
         # Xg vector needs converting from its given (ra, dec) to pixel coordiantes, to be placed
         # in the xy grid correctly (currently this just defaults to the central pixel, but it may
         # not in the future)
+        # TODO: add central RA pixel coordinate to xg to allow for non-zero coordinates
         xg = np.array([[(ra / pixel_scale + x_cent) * pixel_scale / half_l_r],
                        [(dec / pixel_scale + y_cent) * pixel_scale / half_l_r]])
         x_pos = (np.arange(0, image_test.shape[0])) * pixel_scale / half_l_r
@@ -191,26 +279,40 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
             pk = pks[k]
             Vk = Vks[k]
             mk = mks[k]
-            # TODO: figure out where the factors of 10 and oversampling**2 are coming from
             for m in xrange(0, len(vms)):
                 cm = cms[m]
                 vm = vms[m]
-                # Vgm = RVR^T = v RR^T given that V = vI
+                # Vgm = RVR^T = vm RR^T given that V = vmI
                 Vgm = vm * Vgm_unit
                 # reshape m and m_t to force propagation of arrays, remembering row vectors are
                 # (1, x) and column vectors are (x, 1) in shape
                 m = (mk + xg).reshape(1, 1, 2, 1)
                 m_t = m.reshape(1, 1, 1, 2)
-                v = Vgm + Vk
-                image_test += Sg * cm * pk * gaussian_2d(coords, coords_t, m, m_t, v)
+                V = Vgm + Vk
+                g_2d = gaussian_2d(coords, coords_t, m, m_t, V)
+                image_test += Sg * cm * pk * g_2d * (pixel_scale / half_l_r)**2
         image_test += 1e-8
         mog_time += timeit.default_timer()-start
+        new_gal_folder, new_gal_file = shifted_galaxy_cat_file.split('/')
+        new_gal_conv = new_gal_file.split('.')[0] + '_01_conv_{}.txt'.format(filters[j].upper())
+        internal_flux = np.loadtxt(new_gal_folder + '/' + new_gal_conv, comments=['\\', '|'], usecols=[2])
+        new_gal_conv_obs = new_gal_conv.split('.')[0] + '_observed_WFIRST-WFI.txt'
+        stmag, countrate = np.loadtxt(new_gal_folder + '/' + new_gal_conv_obs, comments=['\\', '|'], usecols=[4, 5])
+        zp_internal = mag + 2.5 * np.log10(internal_flux)
+        zp_fixed = stmag + 2.5 * np.log10(countrate)
+        print "{}: Full flux: {:.2f}, test flux: {:.2f}, initial magnitude: {:.2f}, converted initial flux (ZP={:.2f}): {:.2f}, internal flux: {:.2f}, final quoted mag/flux: {:.2f}/{:.2f} (Zp = {:.2f}), internal ZP: {:.2f}".format(filters[j].upper(), np.sum(image_full), np.sum(image_test), mag, filt_zp[j], Sg, internal_flux, stmag, countrate, zp_fixed, zp_internal)
 
-        xp, yp = np.meshgrid(np.arange(0, image_test.shape[0]), np.arange(0, image_test.shape[1]), indexing='ij')
+        # xp, yp = np.meshgrid(np.arange(0, image_test.shape[0]), np.arange(0, image_test.shape[1]), indexing='ij')
+        # x_ = (np.arange(0, image_test.shape[0]) - image_test.shape[0]/2) * pixel_scale
+        # y_ = (np.arange(0, image_test.shape[1]) - image_test.shape[1]/2) * pixel_scale
+        # x_, y_ = x_.reshape(-1, 1), y_.reshape(1, -1)
+        # crit = ((x_ * np.cos(t) + y_ * np.sin(t)) / (b * half_l_r))**2 + \
+        #        ((x_ * np.sin(t) - y_ * np.cos(t)) / (a * half_l_r))**2 <= 1
+
         for k, (im, name) in enumerate(zip([image_full, image_test, image_full/(image_full+image_test)], ['full', 'test', 'full / (full + test)'])):
             ax = plt.subplot(gs[k, j])
 
-            norm = simple_norm(im, 'linear', percent=99.9)
+            norm = simple_norm(im[im > 0], 'linear', percent=99.9)
             img = ax.imshow(im, origin='lower', cmap='viridis', norm=norm)
             cb = plt.colorbar(img, ax=ax, use_gridspec=True)
             cb.set_label('Count rate / e$^-$ s$^{-1}$' if k < 2 else 'Full / (Full + MoG)')
@@ -712,7 +814,9 @@ sn_type = 'Ia'
 
 times = [-10, 0, 10, 20, 30]
 
-mog_galaxy_test(filters, pixel_scale, exptime, filt_zp)
+psf_names = ['../../pandeia_data-1.0/wfirst/wfirstimager/psfs/wfirstimager_any_{}.fits'.format(num) for num in [0.8421, 1.0697, 1.4464, 1.2476, 1.5536, 1.9068]]
+psf_mog_fitting(psf_names, pixel_scale)
+# mog_galaxy_test(filters, pixel_scale, exptime, filt_zp)
 
 sys.exit()
 
