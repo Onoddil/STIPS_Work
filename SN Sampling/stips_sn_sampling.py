@@ -67,42 +67,208 @@ def model_number(run_minutes, run_n, run_obs, n_runs):
 
     print "{} choices, {:.0f}/{:.0f}/{:.0f} approximate minutes/hours/days".format(n_tot, time, time/60, time/60/24)
 
+# f = c/2pi s exp(-0.5 (X+Y))
+# X = (x - mux)**2/s**2
+# Y = (y - muy)**2/s**2
+# dfdmux = f X / (x - mux), dfdmuy = f Y / (y - muy), dfdc = f / c, dfds = f (X + Y - 1) / s
+# d2fdmux2 = f (X / (x - mux))**2 - f / s**2, d2fdmuy2 = f (Y / (y - muy))**2 - f / s**2
+# d2fdc2 = 0, d2fds2 = f / s**2 - dfds (X + Y - 1) / s - 3 f (X + Y) / s**2
+# d2fdmuxdmuy = f X Y / (x - mux) / (y - muy), d2fdmuxdc = f X / c / (x - mux)
+# d2fdmuydc = f Y / c / (y - muy), d2f2muxds = dfds X / (x - mux), d2f2muyds = dfds Y / (y - muy)
+# d2fdcds = dfds / c
 
-def psf_fit_jac(p, x, y, z):
-    mu_xs, mu_ys, sigmas, cks = [p[0+i*4] for i in xrange(0, int(len(p)/4))], \
-                                [p[1+i*4] for i in xrange(0, int(len(p)/4))], \
-                                [p[2+i*4] for i in xrange(0, int(len(p)/4))], \
-                                [p[3+i*4] for i in xrange(0, int(len(p)/4))]
+# F = sum_i (sum_j f_ij(c_j, s_j, mux_j, muy_j, x_i, y_i) - z_i)**2
+# dFda = sum_i 2 (sum_j f_ij - z_i) dfikda (assuming no parameters are shared between individual
+# gaussians in a MoG -- notice the dropped j subscribe in dfikda; this is a specific gaussian only)
+# d2Fdadb = sum_i 2 (sum_j f_ij - z_i) d2fikdadb + 2 dfikda dfildb (d2fikdadb is zero unless
+# a and b are parameters of a single gaussian, given the non-sharing of parameters; however, the
+# second term is always present across off-axis terms)
+
+@profile
+def psf_fit_hess(p, x, y, z, o_inv_sq):
+    mu_xs, mu_ys, sigmas, cks = np.array([p[0+i*4] for i in xrange(0, int(len(p)/4))]), \
+                                np.array([p[1+i*4] for i in xrange(0, int(len(p)/4))]), \
+                                np.array([p[2+i*4] for i in xrange(0, int(len(p)/4))]), \
+                                np.array([p[3+i*4] for i in xrange(0, int(len(p)/4))])
+    hess = np.empty((len(p), len(p)), float)
+    # model_z is sum_j f_ij above
+    x_s, y_s, Xs, Ys = [], [], [], []
+    fs = np.zeros((len(p) // 4, len(x), len(y)), float)
+    dfdcs = np.empty_like(fs)
+    for i in xrange(0, len(mu_xs)):
+        mu_x, mu_y, s, ck = mu_xs[i], mu_ys[i], sigmas[i], cks[i]
+        x_ = (x - mu_x).reshape(-1, 1)
+        y_ = (y - mu_y).reshape(1, -1)
+        exp_x = np.exp(-0.5 * x_**2 / s**2)
+        exp_y = np.exp(-0.5 * y_**2 / s**2)
+        x_s.append(x_)
+        y_s.append(y_)
+        Xs.append(x_**2 / s**2)
+        Ys.append(y_**2 / s**2)
+        dfdcs[i] = 1/(2 * np.pi * s) * exp_x * exp_y
+        fs[i] = ck * dfdcs[i]
+    model_z = np.sum(fs, axis=0)
+    dz = model_z - z
+    two_o_inv_sq = 2 * o_inv_sq
+    group_terms = dz * two_o_inv_sq
     jac = np.empty(len(p), float)
-    jac_sub = np.empty_like(jac)
+    # model_z is sum_j f_ij above
     for i in xrange(0, len(p)):
         i_set = i // 4
         i_in = i % 4
-        mu_x, mu_y, sigma, ck = mu_xs[i_set], mu_ys[i_set], sigmas[i_set], cks[i_set]
+        mu_x, mu_y, s, ck = mu_xs[i_set], mu_ys[i_set], sigmas[i_set], cks[i_set]
+        x_ = x_s[i_set]
+        y_ = y_s[i_set]
+        X = Xs[i_set]
+        Y = Ys[i_set]
+        f = fs[i_set]
+        # each of our four parameters in turn are mux, muy, s and c; remember we must avoid
+        # divide-by-zero errors with out differentials here and in the second-order below
+        if i_in == 0:
+            dfda = f * x_ / s**2
+        elif i_in == 1:
+            dfda = f * y_ / s**2
+        elif i_in == 2:
+            dfda = f * (X + Y - 1) / s
+        elif i_in == 3:
+            dfda = dfdcs[i_set]
+        dFda = np.sum(group_terms * dfda)
+        jac[i] = dFda
+    for i in  xrange(0, len(p)):
+        i_set = i // 4
+        i_in = i % 4
+        # having pre-computed the jacobian we can simply call the derivative here, rather than
+        # having to worry about which i_in counter is set for which of the variables again
+        dfda = jac[i]
+        for j in xrange(0, len(p)):
+            j_set = j // 4
+            j_in = j % 4
+            dfdb = jac[j]
+            if j_set != i_set:
+                # if the parameter 'sets' are different, then d2fdadb = 0 so we drop a term from
+                # the overall function derivative d2Fdadb; function is then
+                # sum_i 2 / o**2 dfda dfdb
+                d2Fdadb = np.sum(two_o_inv_sq * dfda * dfdb)
+            else:
+                # we only have to re-compute anything for the variable pair that correspond to the
+                # same gaussian, and so we only need these parameters if i_set != j_set; they are
+                # also going to be the same so we only need one copy
+                mu_x, mu_y, s, ck = mu_xs[j_set], mu_ys[j_set], sigmas[j_set], cks[j_set]
+                x_ = x_s[j_set]
+                y_ = y_s[j_set]
+                X = Xs[j_set]
+                Y = Ys[j_set]
+                f = fs[j_set]
+                # however, we now have N**2 potential derivatives to calculate; luckily the matrix
+                # is symmetric so we only have to calculate the Nth triangular number options,
+                # remembering to check for the symmetric indices
+                if i_in == 0 and j_in == 0:
+                    d2fdadb = f / s**2 * ((x_ / s)**2 - 1)
+                elif (i_in == 0 and j_in == 1) or (i_in == 1 and j_in == 0):
+                    d2fdadb = f * x_ * y_ / s**4
+                elif (i_in == 0 and j_in == 2) or (i_in == 2 and j_in == 0):
+                    d2fdadb = f * x_ * (X + Y - 1) / s**3
+                elif (i_in == 0 and j_in == 3) or (i_in == 3 and j_in == 0):
+                    d2fdadb = dfdcs[j_set] * x_ / s**2
+                elif i_in == 1 and j_in == 1:
+                    d2fdadb = f / s**2 * ((y_ / s)**2 - 1)
+                elif (i_in == 1 and j_in == 2) or (i_in == 2 and j_in == 1):
+                    d2fdadb = f * y_ * (X + Y - 1) / s**3
+                elif (i_in == 1 and j_in == 3) or (i_in == 3 and j_in == 1):
+                    d2fdadb = dfdcs[j_set] * y_ / s**2
+                elif (i_in == 2 and j_in == 2):
+                    d2fdadb = f / s**2 * (1 - (X + Y - 1)**2 - 3 * (X + Y))
+                elif (i_in == 2 and j_in == 3) or (i_in == 3 and j_in == 2):
+                    d2fdadb = dfdcs[j_set] * (X + Y - 1) / s
+                elif i_in == 3 and j_in == 3:
+                    d2fdadb = 0
+                # in the same function the second order derivative is non-zero so must be included
+                d2Fdadb = np.sum(group_terms * d2fdadb + two_o_inv_sq * dfda * dfdb)
+            hess[i, j] = d2Fdadb
+    return hess
 
 
-def psf_fit_model(mu_xs, mu_ys, sigmas, cks, x, y):
-    model_z = np.zeros((len(x), len(y)), float)
-    for mu_x, mu_y, sigma, ck in zip(mu_xs, mu_ys, sigmas, cks):
+@profile
+def psf_fit_min(p, x, y, z, o_inv_sq):
+    mu_xs, mu_ys, sigmas, cks = np.array([p[0+i*4] for i in xrange(0, int(len(p)/4))]), \
+                                np.array([p[1+i*4] for i in xrange(0, int(len(p)/4))]), \
+                                np.array([p[2+i*4] for i in xrange(0, int(len(p)/4))]), \
+                                np.array([p[3+i*4] for i in xrange(0, int(len(p)/4))])
+    model_zs = np.zeros((len(p) // 4, len(x), len(y)), float)
+    dfdcs = np.empty_like(model_zs)
+    x_s, y_s, Xs, Ys = [], [], [], []
+    for i, (mu_x, mu_y, s, ck) in enumerate(zip(mu_xs, mu_ys, sigmas, cks)):
         x_ = (x - mu_x).reshape(-1, 1)
         y_ = (y - mu_y).reshape(1, -1)
-        model_z = model_z + ck/(2 * np.pi * sigma) * np.exp(-0.5 * (x_**2 + y_**2) / sigma**2)
-    return model_z
+        exp_x = np.exp(-0.5 * x_**2 / s**2)
+        exp_y = np.exp(-0.5 * y_**2 / s**2)
+        x_s.append(x_)
+        y_s.append(y_)
+        Xs.append(x_**2 / s**2)
+        Ys.append(y_**2 / s**2)
+        # as dfdc = f / c this definition allows for the avoidance of divide-by-zero errors
+        dfdcs[i] = 1/(2 * np.pi * s) * exp_x * exp_y
+        model_zs[i] = ck * dfdcs[i]
+    model_z = np.sum(model_zs, axis=0)
+
+    dz = model_z - z
+    group_terms = 2 * dz * o_inv_sq
+
+    jac = np.empty(len(p), float)
+    # model_z is sum_j f_ij above
+    for i in xrange(0, len(p)):
+        i_set = i // 4
+        i_in = i % 4
+        mu_x, mu_y, s, ck = mu_xs[i_set], mu_ys[i_set], sigmas[i_set], cks[i_set]
+        x_ = x_s[i_set]
+        y_ = y_s[i_set]
+        X = Xs[i_set]
+        Y = Ys[i_set]
+        f = model_zs[i_set]
+        # each of our four parameters in turn are mux, muy, s and c.
+        if i_in == 0:
+            # while we can define these differentials as fX/(x-mux) for clarity we unfortunately
+            # risk a divide-by-zero error this way, so must do the full (x-mux)/s**2
+            dfda = f * x_ / s**2
+        elif i_in == 1:
+            dfda = f * y_ / s**2
+        elif i_in == 2:
+            dfda = f * (X + Y - 1) / s
+        elif i_in == 3:
+            dfda = dfdcs[i_set]
+        # differential of sum_i (sum_j f_ij - z_i)**2 / o**2 is
+        # sum_i (2 * (sum_j f_ij - z_i) * dfda / o**2)
+        dFda = np.sum(group_terms * dfda)
+        jac[i] = dFda
+
+    # group_terms includes a two for the jacobian; remove subsequently, but computationally cheaper
+    return 0.5 * np.sum(group_terms * dz), jac
+
+def print_fun(x, f, accepted):
+    print("{} at minimum {:.4f} accepted {}".format(x, f, int(accepted)))
 
 
-def psf_fit_min(p, x, y, z):
-    mu_xs, mu_ys, sigmas, cks = [p[0+i*4] for i in xrange(0, int(len(p)/4))], \
-                                [p[1+i*4] for i in xrange(0, int(len(p)/4))], \
-                                [p[2+i*4] for i in xrange(0, int(len(p)/4))], \
-                                [p[3+i*4] for i in xrange(0, int(len(p)/4))]
-    model_z = psf_fit_model(mu_xs, mu_ys, sigmas, cks, x, y)
-    return np.sum((model_z - z)**2)
+class MyTakeStep(object):
+    def __init__(self, stepsize=0.5):
+        self.stepsize = stepsize
+    def __call__(self, x):
+        s = self.stepsize
+        # each four parameter set is mux, muy, sigma, c. Whatever the stepsize is accept for
+        # mux and muy, but reduce by a factor for sigma and c
+        stepper = np.arange(0, len(x)//4+1e-10, int)
+        x[0 + stepper] += np.random.uniform(-s, s, len(stepper))
+        x[1 + stepper] += np.random.uniform(-s, s, len(stepper))
+        x[2 + stepper] += np.random.uniform(-s/5, s/5, len(stepper))
+        x[3 + stepper] += np.random.uniform(-s/5, s/5, len(stepper))
+        return x
 
 
+@profile
 def psf_mog_fitting(psf_names, pixel_scale):
     psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
     gs = gridcreate('adsq', 3, len(psf_names), 0.8, 15)
     for j in xrange(0, len(psf_names)):
+        print j
         f = pyfits.open(psf_names[j])
         psf_image = f[0].data[4, :, :]
         from photutils import IntegratedGaussianPRF
@@ -113,6 +279,9 @@ def psf_mog_fitting(psf_names, pixel_scale):
         x_, y_ = np.meshgrid(np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1]),
                              indexing='ij')
         psf_image += psf_model(x_, y_)
+        psf_uncert = np.zeros_like(psf_image)
+        psf_uncert[psf_image > 0] = np.sqrt(psf_image[psf_image > 0]) + 0.001
+        psf_uncert[psf_image <= 0] = 1
         ax = plt.subplot(gs[0, j])
         norm = simple_norm(psf_image, 'log', percent=99.9)
         img = ax.imshow(psf_image, origin='lower', cmap='viridis', norm=norm)
@@ -121,19 +290,33 @@ def psf_mog_fitting(psf_names, pixel_scale):
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
+        psf_inv_var = 1 / psf_uncert**2
         x, y = np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1])
-        min_kwarg = {'method': 'newton-cg', 'args': (x, y, psf_image), 'jac': psf_fit_jac,
+        # jac = True requires minimisation function to return a (fun, jac) tuple
+        min_kwarg = {'method': 'Newton-CG', 'args': (x, y, psf_image, psf_inv_var), 'jac': True,
                      'hess': psf_fit_hess}
         x_cent, y_cent = np.ceil((psf_image.shape[0]-1)/2), np.ceil((psf_image.shape[1]-1)/2)
-        res = basinhopping(psf_fit_min, [x_cent, y_cent, 1, 1, x_cent, y_cent, 1, 0],
-                           minimizer_kwargs=min_kwarg, niter=500, T=5)
+        N = 3
+        x0 = []
+        for _ in xrange(0, N):
+            x0 = x0 + [x_cent - 2 + np.random.random()*4, y_cent - 2 + np.random.random()*4,
+                       np.random.random()*0.5, 1]
+        res = basinhopping(psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=15000, T=2,
+                           stepsize=1, disp=True) # callback=print_fun, 
         p = res.x
-        mx, my, s, c = [p[0+i*4] for i in xrange(0, int(len(p)/4))], \
-                       [p[1+i*4] for i in xrange(0, int(len(p)/4))], \
-                       [p[2+i*4] for i in xrange(0, int(len(p)/4))], \
-                       [p[3+i*4] for i in xrange(0, int(len(p)/4))]
-        print mx, my, s, c
-        psf_fit = psf_fit_model(mx, my, s, c, x, y)
+        print res
+        mu_xs, mu_ys, sigmas, cks = [p[0+i*4] for i in xrange(0, int(len(p)/4))], \
+                                    [p[1+i*4] for i in xrange(0, int(len(p)/4))], \
+                                    [p[2+i*4] for i in xrange(0, int(len(p)/4))], \
+                                    [p[3+i*4] for i in xrange(0, int(len(p)/4))]
+        print mu_xs, mu_ys, sigmas, cks
+        psf_fit = np.zeros((len(x), len(y)), float)
+        for mu_x, mu_y, s, ck in zip(mu_xs, mu_ys, sigmas, cks):
+            x_ = (x - mu_x).reshape(-1, 1)
+            y_ = (y - mu_y).reshape(1, -1)
+            exp_x = np.exp(-0.5 * x_**2 / s**2)
+            exp_y = np.exp(-0.5 * y_**2 / s**2)
+            psf_fit = psf_fit + ck/(2 * np.pi * s) * exp_x * exp_y
         ax = plt.subplot(gs[1, j])
         norm = simple_norm(psf_fit, 'log', percent=99.9)
         img = ax.imshow(psf_fit, origin='lower', cmap='viridis', norm=norm)
@@ -142,10 +325,11 @@ def psf_mog_fitting(psf_names, pixel_scale):
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
         ax = plt.subplot(gs[2, j])
-        norm = simple_norm((psf_fit - psf_image) / psf_image, 'linear', percent=90)
-        img = ax.imshow((psf_fit - psf_image)/psf_image, origin='lower', cmap='viridis', norm=norm)
+        ratio = (psf_fit - psf_image) / psf_image
+        norm = simple_norm(ratio[psf_image > 0.001], 'linear', percent=100)
+        img = ax.imshow(ratio, origin='lower', cmap='viridis', norm=norm)
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label('Relative difference')
+        cb.set_label('Relative Difference')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
@@ -517,7 +701,6 @@ def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
     return sn_model
 
 
-@profile
 def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
     nfilts = len(filters)
     ntimes = len(times)
