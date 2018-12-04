@@ -25,6 +25,8 @@ from stips.observation_module import ObservationModule
 import sncosmo
 import astropy.units as u
 
+import sn_sampling_f2py as snsf
+
 try:
     profile
 except NameError:
@@ -111,8 +113,10 @@ def psf_fit_hess(p, x, y, z, o_inv_sq):
     dz = model_z - z
     two_o_inv_sq = 2 * o_inv_sq
     group_terms = dz * two_o_inv_sq
-    jac = np.empty(len(p), float)
-    # model_z is sum_j f_ij above
+    jac_subfunc = np.empty((len(p), len(x), len(y)), float)
+    # model_z is sum_j f_ij above -- here we must calculate dfda NOT dFda; subtle difference, but
+    # important. these are the individual "mini" function differentials, not the overall function
+    # differentials!
     for i in xrange(0, len(p)):
         i_set = i // 4
         i_in = i % 4
@@ -132,18 +136,17 @@ def psf_fit_hess(p, x, y, z, o_inv_sq):
             dfda = f * (X + Y - 1) / s
         elif i_in == 3:
             dfda = dfdcs[i_set]
-        dFda = np.sum(group_terms * dfda)
-        jac[i] = dFda
+        jac_subfunc[i] = dfda
     for i in  xrange(0, len(p)):
         i_set = i // 4
         i_in = i % 4
         # having pre-computed the jacobian we can simply call the derivative here, rather than
         # having to worry about which i_in counter is set for which of the variables again
-        dfda = jac[i]
+        dfda = jac_subfunc[i]
         for j in xrange(0, len(p)):
             j_set = j // 4
             j_in = j % 4
-            dfdb = jac[j]
+            dfdb = jac_subfunc[j]
             if j_set != i_set:
                 # if the parameter 'sets' are different, then d2fdadb = 0 so we drop a term from
                 # the overall function derivative d2Fdadb; function is then
@@ -244,9 +247,6 @@ def psf_fit_min(p, x, y, z, o_inv_sq):
     # group_terms includes a two for the jacobian; remove subsequently, but computationally cheaper
     return 0.5 * np.sum(group_terms * dz), jac
 
-def print_fun(x, f, accepted):
-    print("{} at minimum {:.4f} accepted {}".format(x, f, int(accepted)))
-
 
 class MyTakeStep(object):
     def __init__(self, stepsize=0.5):
@@ -258,8 +258,8 @@ class MyTakeStep(object):
         stepper = np.arange(0, len(x)//4+1e-10, int)
         x[0 + stepper] += np.random.uniform(-s, s, len(stepper))
         x[1 + stepper] += np.random.uniform(-s, s, len(stepper))
-        x[2 + stepper] += np.random.uniform(-s/5, s/5, len(stepper))
-        x[3 + stepper] += np.random.uniform(-s/5, s/5, len(stepper))
+        x[2 + stepper] += np.random.uniform(-min(5, s/5), min(5, s/5), len(stepper))
+        x[3 + stepper] += np.random.uniform(-0.5, 0.5, len(stepper))
         return x
 
 
@@ -292,19 +292,33 @@ def psf_mog_fitting(psf_names, pixel_scale):
 
         psf_inv_var = 1 / psf_uncert**2
         x, y = np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1])
-        # jac = True requires minimisation function to return a (fun, jac) tuple
-        min_kwarg = {'method': 'Newton-CG', 'args': (x, y, psf_image, psf_inv_var), 'jac': True,
-                     'hess': psf_fit_hess}
         x_cent, y_cent = np.ceil((psf_image.shape[0]-1)/2), np.ceil((psf_image.shape[1]-1)/2)
-        N = 3
+        N = 5
         x0 = []
         for _ in xrange(0, N):
             x0 = x0 + [x_cent - 2 + np.random.random()*4, y_cent - 2 + np.random.random()*4,
                        np.random.random()*0.5, 1]
-        res = basinhopping(psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=15000, T=2,
-                           stepsize=1, disp=True) # callback=print_fun, 
-        p = res.x
+
+        min_kwarg = {'method': 'Newton-CG', 'args': (x, y, np.asfortranarray(psf_image),
+                     np.asfortranarray(psf_inv_var), 4), 'jac': True, 'hess': snsf.psf_fit_hess}
+        start = timeit.default_timer()
+        res = basinhopping(snsf.psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=50, T=5,
+                                   stepsize=50)
+        print "=============== f2py =============="
         print res
+        print timeit.default_timer()-start
+
+        # jac = True requires minimisation function to return a (fun, jac) tuple
+        min_kwarg = {'method': 'Newton-CG', 'args': (x, y, psf_image, psf_inv_var), 'jac': True,
+                     'hess': psf_fit_hess}
+        start = timeit.default_timer()
+        res = basinhopping(psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=50, T=5,
+                           stepsize=50)
+        print "=============== python =============="
+        print res
+        print timeit.default_timer()-start
+
+        p = res.x
         mu_xs, mu_ys, sigmas, cks = [p[0+i*4] for i in xrange(0, int(len(p)/4))], \
                                     [p[1+i*4] for i in xrange(0, int(len(p)/4))], \
                                     [p[2+i*4] for i in xrange(0, int(len(p)/4))], \
