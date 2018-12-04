@@ -285,14 +285,14 @@ def psf_mog_fitting(psf_names, pixel_scale):
         print j
         f = pyfits.open(psf_names[j])
         psf_image = f[0].data[4, :, :]
-        from photutils import IntegratedGaussianPRF
-        psf_image = np.zeros((119, 119), float)
-        sigma = 0.13 / pixel_scale / (2 * np.sqrt(2 * np.log(2)))
-        x0, y0 = (psf_image.shape[0] - 1) / 2, (psf_image.shape[1] - 1) / 2
-        psf_model = IntegratedGaussianPRF(sigma=sigma, x_0=x0, y_0=y0, flux=1)
-        x_, y_ = np.meshgrid(np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1]),
-                             indexing='ij')
-        psf_image += psf_model(x_, y_)
+        # from photutils import IntegratedGaussianPRF
+        # psf_image = np.zeros((119, 119), float)
+        # sigma = 0.13 / pixel_scale / (2 * np.sqrt(2 * np.log(2)))
+        # x0, y0 = (psf_image.shape[0] - 1) / 2, (psf_image.shape[1] - 1) / 2
+        # psf_model = IntegratedGaussianPRF(sigma=sigma, x_0=x0, y_0=y0, flux=1)
+        # x_, y_ = np.meshgrid(np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1]),
+        #                      indexing='ij')
+        # psf_image += psf_model(x_, y_)
         psf_uncert = np.zeros_like(psf_image)
         psf_uncert[psf_image > 0] = np.sqrt(psf_image[psf_image > 0]) + 0.001
         psf_uncert[psf_image <= 0] = 1
@@ -307,234 +307,19 @@ def psf_mog_fitting(psf_names, pixel_scale):
         psf_inv_var = 1 / psf_uncert**2
         x, y = np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1])
         x_cent, y_cent = np.ceil((psf_image.shape[0]-1)/2), np.ceil((psf_image.shape[1]-1)/2)
-        N = 5
+        N = 20
         x0 = []
         for _ in xrange(0, N):
             x0 = x0 + [x_cent - 2 + np.random.random()*4, y_cent - 2 + np.random.random()*4,
-                       np.random.random()*0.5, 1]
-
-
-
-
-        setup = """
-def psf_fit_hess(p, x, y, z, o_inv_sq):
-    mu_xs, mu_ys, sigmas, cks = np.array([p[0+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[1+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[2+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[3+i*4] for i in xrange(0, int(len(p)/4))])
-    hess = np.empty((len(p), len(p)), float)
-    # model_z is sum_j f_ij above
-    x_s, y_s, Xs, Ys = [], [], [], []
-    fs = np.zeros((len(p) // 4, len(x), len(y)), float)
-    dfdcs = np.empty_like(fs)
-    for i in xrange(0, len(mu_xs)):
-        mu_x, mu_y, s, ck = mu_xs[i], mu_ys[i], sigmas[i], cks[i]
-        x_ = (x - mu_x).reshape(-1, 1)
-        y_ = (y - mu_y).reshape(1, -1)
-        exp_x = np.exp(-0.5 * x_**2 / s**2)
-        exp_y = np.exp(-0.5 * y_**2 / s**2)
-        x_s.append(x_)
-        y_s.append(y_)
-        Xs.append(x_**2 / s**2)
-        Ys.append(y_**2 / s**2)
-        dfdcs[i] = 1/(2 * np.pi * s) * exp_x * exp_y
-        fs[i] = ck * dfdcs[i]
-    model_z = np.sum(fs, axis=0)
-    dz = model_z - z
-    two_o_inv_sq = 2 * o_inv_sq
-    group_terms = dz * two_o_inv_sq
-    jac_subfunc = np.empty((len(p), len(x), len(y)), float)
-    # model_z is sum_j f_ij above -- here we must calculate dfda NOT dFda; subtle difference, but
-    # important. these are the individual "mini" function differentials, not the overall function
-    # differentials!
-    for i in xrange(0, len(p)):
-        i_set = i // 4
-        i_in = i % 4
-        mu_x, mu_y, s, ck = mu_xs[i_set], mu_ys[i_set], sigmas[i_set], cks[i_set]
-        x_ = x_s[i_set]
-        y_ = y_s[i_set]
-        X = Xs[i_set]
-        Y = Ys[i_set]
-        f = fs[i_set]
-        # each of our four parameters in turn are mux, muy, s and c; remember we must avoid
-        # divide-by-zero errors with out differentials here and in the second-order below
-        if i_in == 0:
-            dfda = f * x_ / s**2
-        elif i_in == 1:
-            dfda = f * y_ / s**2
-        elif i_in == 2:
-            dfda = f * (X + Y - 1) / s
-        elif i_in == 3:
-            dfda = dfdcs[i_set]
-        jac_subfunc[i] = dfda
-    for i in xrange(0, len(p)):
-        i_set = i // 4
-        i_in = i % 4
-        # having pre-computed the jacobian we can simply call the derivative here, rather than
-        # having to worry about which i_in counter is set for which of the variables again
-        dfda = jac_subfunc[i]
-        for j in xrange(0, len(p)):
-            j_set = j // 4
-            j_in = j % 4
-            dfdb = jac_subfunc[j]
-            if j_set != i_set:
-                # if the parameter 'sets' are different, then d2fdadb = 0 so we drop a term from
-                # the overall function derivative d2Fdadb; function is then
-                # sum_i 2 / o**2 dfda dfdb
-                d2Fdadb = np.sum(two_o_inv_sq * dfda * dfdb)
-            else:
-                # we only have to re-compute anything for the variable pair that correspond to the
-                # same gaussian, and so we only need these parameters if i_set != j_set; they are
-                # also going to be the same so we only need one copy
-                mu_x, mu_y, s, ck = mu_xs[j_set], mu_ys[j_set], sigmas[j_set], cks[j_set]
-                x_ = x_s[j_set]
-                y_ = y_s[j_set]
-                X = Xs[j_set]
-                Y = Ys[j_set]
-                f = fs[j_set]
-                # however, we now have N**2 potential derivatives to calculate; luckily the matrix
-                # is symmetric so we only have to calculate the Nth triangular number options,
-                # remembering to check for the symmetric indices
-                if i_in == 0 and j_in == 0:
-                    d2fdadb = f / s**2 * ((x_ / s)**2 - 1)
-                elif (i_in == 0 and j_in == 1) or (i_in == 1 and j_in == 0):
-                    d2fdadb = f * x_ * y_ / s**4
-                elif (i_in == 0 and j_in == 2) or (i_in == 2 and j_in == 0):
-                    d2fdadb = f * x_ * (X + Y - 3) / s**3
-                elif (i_in == 0 and j_in == 3) or (i_in == 3 and j_in == 0):
-                    d2fdadb = dfdcs[j_set] * x_ / s**2
-                elif i_in == 1 and j_in == 1:
-                    d2fdadb = f / s**2 * ((y_ / s)**2 - 1)
-                elif (i_in == 1 and j_in == 2) or (i_in == 2 and j_in == 1):
-                    d2fdadb = f * y_ * (X + Y - 3) / s**3
-                elif (i_in == 1 and j_in == 3) or (i_in == 3 and j_in == 1):
-                    d2fdadb = dfdcs[j_set] * y_ / s**2
-                elif (i_in == 2 and j_in == 2):
-                    d2fdadb = f / s**2 * (1 + (X + Y - 1)**2 - 3 * (X + Y))
-                elif (i_in == 2 and j_in == 3) or (i_in == 3 and j_in == 2):
-                    d2fdadb = dfdcs[j_set] * (X + Y - 1) / s
-                elif i_in == 3 and j_in == 3:
-                    d2fdadb = 0
-                # in the same function the second order derivative is non-zero so must be included
-                d2Fdadb = np.sum(group_terms * d2fdadb + two_o_inv_sq * dfda * dfdb)
-            hess[i, j] = d2Fdadb
-    return hess
-
-
-def psf_fit_min(p, x, y, z, o_inv_sq):
-    mu_xs, mu_ys, sigmas, cks = np.array([p[0+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[1+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[2+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[3+i*4] for i in xrange(0, int(len(p)/4))])
-    model_zs = np.zeros((len(p) // 4, len(x), len(y)), float)
-    dfdcs = np.empty_like(model_zs)
-    x_s, y_s, Xs, Ys = [], [], [], []
-    for i, (mu_x, mu_y, s, ck) in enumerate(zip(mu_xs, mu_ys, sigmas, cks)):
-        x_ = (x - mu_x).reshape(-1, 1)
-        y_ = (y - mu_y).reshape(1, -1)
-        exp_x = np.exp(-0.5 * x_**2 / s**2)
-        exp_y = np.exp(-0.5 * y_**2 / s**2)
-        x_s.append(x_)
-        y_s.append(y_)
-        Xs.append(x_**2 / s**2)
-        Ys.append(y_**2 / s**2)
-        # as dfdc = f / c this definition allows for the avoidance of divide-by-zero errors
-        dfdcs[i] = 1/(2 * np.pi * s) * exp_x * exp_y
-        model_zs[i] = ck * dfdcs[i]
-    model_z = np.sum(model_zs, axis=0)
-
-    dz = model_z - z
-    group_terms = 2 * dz * o_inv_sq
-
-    jac = np.empty(len(p), float)
-    # model_z is sum_j f_ij above
-    for i in xrange(0, len(p)):
-        i_set = i // 4
-        i_in = i % 4
-        mu_x, mu_y, s, ck = mu_xs[i_set], mu_ys[i_set], sigmas[i_set], cks[i_set]
-        x_ = x_s[i_set]
-        y_ = y_s[i_set]
-        X = Xs[i_set]
-        Y = Ys[i_set]
-        f = model_zs[i_set]
-        # each of our four parameters in turn are mux, muy, s and c.
-        if i_in == 0:
-            # while we can define these differentials as fX/(x-mux) for clarity we unfortunately
-            # risk a divide-by-zero error this way, so must do the full (x-mux)/s**2
-            dfda = f * x_ / s**2
-        elif i_in == 1:
-            dfda = f * y_ / s**2
-        elif i_in == 2:
-            dfda = f * (X + Y - 1) / s
-        elif i_in == 3:
-            dfda = dfdcs[i_set]
-        # differential of sum_i (sum_j f_ij - z_i)**2 / o**2 is
-        # sum_i (2 * (sum_j f_ij - z_i) * dfda / o**2)
-        dFda = np.sum(group_terms * dfda)
-        jac[i] = dFda
-
-    # group_terms includes a two for the jacobian; remove subsequently, but computationally cheaper
-    return 0.5 * np.sum(group_terms * dz), jac
-
-import scipy.optimize
-import astropy.io.fits as pyfits
-import numpy as np
-pixel_scale = 0.11
-
-j = 0
-psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
-f = pyfits.open(psf_names[j])
-psf_image = f[0].data[4, :, :]
-from photutils import IntegratedGaussianPRF
-psf_image = np.zeros((119, 119), float)
-sigma = 0.13 / pixel_scale / (2 * np.sqrt(2 * np.log(2)))
-x0, y0 = (psf_image.shape[0] - 1) / 2, (psf_image.shape[1] - 1) / 2
-psf_model = IntegratedGaussianPRF(sigma=sigma, x_0=x0, y_0=y0, flux=1)
-x_, y_ = np.meshgrid(np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1]),
-                     indexing='ij')
-psf_image += psf_model(x_, y_)
-psf_uncert = np.zeros_like(psf_image)
-psf_uncert[psf_image > 0] = np.sqrt(psf_image[psf_image > 0]) + 0.001
-psf_uncert[psf_image <= 0] = 1
-psf_inv_var = 1 / psf_uncert**2
-x, y = np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1])
-x_cent, y_cent = np.ceil((psf_image.shape[0]-1)/2), np.ceil((psf_image.shape[1]-1)/2)
-N = 5
-x0 = []
-for _ in xrange(0, N):
-    x0 = x0 + [x_cent - 2 + np.random.random()*4, y_cent - 2 + np.random.random()*4,
-               np.random.random()*0.5, 1]
-        """
-        import scipy.optimize
-        # snsf.psf_fit_hess, snsf.psf_fit_min
-        for method, extra in zip(["'trust-ncg'", "'L-BFGS-B'"], [', hess=psf_fit_hess', '']):
-            if extra == '':
-                print method
-            else:
-                print method + ' hess'
-            a = timeit.repeat("import scipy.optimize; scipy.optimize.minimize(psf_fit_min, x0, method={}, args=(x, y, psf_image, psf_inv_var), jac=True{})".format(method, extra), setup=setup, number=25, repeat=25)
-            print a
-            res = scipy.optimize.minimize(psf_fit_min, x0, method=method[1:-1], args=(x, y, psf_image, psf_inv_var), jac=True, hess=None if extra == '' else psf_fit_hess)
-            print res
-        sys.exit()
+                       np.random.random()*0.5, np.random.random()]
 
         # trust-ncg , hess=(snsf.)psf_fit_hess vs L-BFGS-B
-
-        min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, np.asfortranarray(psf_image),
-                     np.asfortranarray(psf_inv_var), 4), 'jac': True}
-        start = timeit.default_timer()
-        res = basinhopping(snsf.psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=50, T=5,
-                           stepsize=50)
-        print "=============== f2py =============="
-        print res
-        print timeit.default_timer()-start
 
         # jac = True requires minimisation function to return a (fun, jac) tuple
         min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_image, psf_inv_var), 'jac': True}
         start = timeit.default_timer()
         res = basinhopping(psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=50, T=5,
                            stepsize=50)
-        print "=============== python =============="
         print res
         print timeit.default_timer()-start
 
