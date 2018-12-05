@@ -1,11 +1,11 @@
 from __future__ import division
 import os
 import sys
-from glob import glob
-path = '../../STScI-STIPS'
-sys.path.insert(1, path)
-import stips
-print stips.__file__, stips.__version__
+# from glob import glob
+# path = '../../STScI-STIPS'
+# sys.path.insert(1, path)
+# import stips
+# print(stips.__file__, stips.__version__)
 import matplotlib.gridspec as gridspec
 import numpy as np
 
@@ -19,13 +19,14 @@ from scipy.special import gammaincinv
 from astropy.table import Table
 from scipy.optimize import basinhopping
 
-from stips.scene_module import SceneModule
-from stips.observation_module import ObservationModule
+# from stips.scene_module import SceneModule
+# from stips.observation_module import ObservationModule
 
 import sncosmo
 import astropy.units as u
 
-import sn_sampling_f2py as snsf
+import multiprocessing
+import itertools
 
 try:
     profile
@@ -67,7 +68,7 @@ def model_number(run_minutes, run_n, run_obs, n_runs):
 
     n_tot = n_filt_choice * n_cadence
 
-    print "{} choices, {:.0f}/{:.0f}/{:.0f} approximate minutes/hours/days".format(n_tot, time, time/60, time/60/24)
+    print("{} choices, {:.0f}/{:.0f}/{:.0f} approximate minutes/hours/days".format(n_tot, time, time/60, time/60/24))
 
 # f = c/2pi s exp(-0.5 (X+Y))
 # X = (x - mux)**2/s**2
@@ -89,16 +90,16 @@ def model_number(run_minutes, run_n, run_obs, n_runs):
 
 @profile
 def psf_fit_hess(p, x, y, z, o_inv_sq):
-    mu_xs, mu_ys, sigmas, cks = np.array([p[0+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[1+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[2+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[3+i*4] for i in xrange(0, int(len(p)/4))])
+    mu_xs, mu_ys, sigmas, cks = np.array([p[0+i*4] for i in range(0, int(len(p)/4))]), \
+        np.array([p[1+i*4] for i in range(0, int(len(p)/4))]), \
+        np.array([p[2+i*4] for i in range(0, int(len(p)/4))]), \
+        np.array([p[3+i*4] for i in range(0, int(len(p)/4))])
     hess = np.empty((len(p), len(p)), float)
     # model_z is sum_j f_ij above
     x_s, y_s, Xs, Ys = [], [], [], []
     fs = np.zeros((len(p) // 4, len(x), len(y)), float)
     dfdcs = np.empty_like(fs)
-    for i in xrange(0, len(mu_xs)):
+    for i in range(0, len(mu_xs)):
         mu_x, mu_y, s, ck = mu_xs[i], mu_ys[i], sigmas[i], cks[i]
         x_ = (x - mu_x).reshape(-1, 1)
         y_ = (y - mu_y).reshape(1, -1)
@@ -118,7 +119,7 @@ def psf_fit_hess(p, x, y, z, o_inv_sq):
     # model_z is sum_j f_ij above -- here we must calculate dfda NOT dFda; subtle difference, but
     # important. these are the individual "mini" function differentials, not the overall function
     # differentials!
-    for i in xrange(0, len(p)):
+    for i in range(0, len(p)):
         i_set = i // 4
         i_in = i % 4
         mu_x, mu_y, s, ck = mu_xs[i_set], mu_ys[i_set], sigmas[i_set], cks[i_set]
@@ -138,13 +139,13 @@ def psf_fit_hess(p, x, y, z, o_inv_sq):
         elif i_in == 3:
             dfda = dfdcs[i_set]
         jac_subfunc[i] = dfda
-    for i in xrange(0, len(p)):
+    for i in range(0, len(p)):
         i_set = i // 4
         i_in = i % 4
         # having pre-computed the jacobian we can simply call the derivative here, rather than
         # having to worry about which i_in counter is set for which of the variables again
         dfda = jac_subfunc[i]
-        for j in xrange(0, len(p)):
+        for j in range(0, len(p)):
             j_set = j // 4
             j_in = j % 4
             dfdb = jac_subfunc[j]
@@ -194,10 +195,10 @@ def psf_fit_hess(p, x, y, z, o_inv_sq):
 
 @profile
 def psf_fit_min(p, x, y, z, o_inv_sq):
-    mu_xs, mu_ys, sigmas, cks = np.array([p[0+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[1+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[2+i*4] for i in xrange(0, int(len(p)/4))]), \
-        np.array([p[3+i*4] for i in xrange(0, int(len(p)/4))])
+    mu_xs, mu_ys, sigmas, cks = np.array([p[0+i*4] for i in range(0, int(len(p)/4))]), \
+        np.array([p[1+i*4] for i in range(0, int(len(p)/4))]), \
+        np.array([p[2+i*4] for i in range(0, int(len(p)/4))]), \
+        np.array([p[3+i*4] for i in range(0, int(len(p)/4))])
     model_zs = np.zeros((len(p) // 4, len(x), len(y)), float)
     dfdcs = np.empty_like(model_zs)
     x_s, y_s, Xs, Ys = [], [], [], []
@@ -220,7 +221,7 @@ def psf_fit_min(p, x, y, z, o_inv_sq):
 
     jac = np.empty(len(p), float)
     # model_z is sum_j f_ij above
-    for i in xrange(0, len(p)):
+    for i in range(0, len(p)):
         i_set = i // 4
         i_in = i % 4
         mu_x, mu_y, s, ck = mu_xs[i_set], mu_ys[i_set], sigmas[i_set], cks[i_set]
@@ -265,24 +266,24 @@ class MyTakeStep(object):
         return x
 
 
-@profile
-def fit_wrap(p, x, y, z, o_inv_sq, nitem):
-    fun, jac = snsf.psf_fit_min(p, x, y, z, o_inv_sq, nitem)
-    return fun, jac
+def psf_fitting_wrapper(iterable):
+    i, (x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg) = iterable
+    x0 = []
+    for _ in range(0, N):
+        x0 = x0 + [x_cent - 20 + np.random.random()*40, y_cent - 20 + np.random.random()*40,
+                   np.random.random()*0.5, np.random.random()]
+    res = basinhopping(psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=50, T=5,
+                       stepsize=50)
 
-
-@profile
-def hess_wrap(p, x, y, z, o_inv_sq, nitem):
-    hess = snsf.psf_fit_hess(p, x, y, z, o_inv_sq, nitem)
-    return hess
+    return res
 
 
 @profile
 def psf_mog_fitting(psf_names, pixel_scale):
     psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
     gs = gridcreate('adsq', 3, len(psf_names), 0.8, 15)
-    for j in xrange(0, len(psf_names)):
-        print j
+    for j in range(0, len(psf_names)):
+        print(j)
         f = pyfits.open(psf_names[j])
         psf_image = f[0].data[4, :, :]
         # from photutils import IntegratedGaussianPRF
@@ -293,9 +294,7 @@ def psf_mog_fitting(psf_names, pixel_scale):
         # x_, y_ = np.meshgrid(np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1]),
         #                      indexing='ij')
         # psf_image += psf_model(x_, y_)
-        psf_uncert = np.zeros_like(psf_image)
-        psf_uncert[psf_image > 0] = np.sqrt(psf_image[psf_image > 0]) + 0.001
-        psf_uncert[psf_image <= 0] = 1
+
         ax = plt.subplot(gs[0, j])
         norm = simple_norm(psf_image, 'log', percent=99.9)
         img = ax.imshow(psf_image, origin='lower', cmap='viridis', norm=norm)
@@ -304,30 +303,37 @@ def psf_mog_fitting(psf_names, pixel_scale):
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
-        psf_inv_var = 1 / psf_uncert**2
         x, y = np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1])
         x_cent, y_cent = np.ceil((psf_image.shape[0]-1)/2), np.ceil((psf_image.shape[1]-1)/2)
-        N = 20
-        x0 = []
-        for _ in xrange(0, N):
-            x0 = x0 + [x_cent - 2 + np.random.random()*4, y_cent - 2 + np.random.random()*4,
-                       np.random.random()*0.5, np.random.random()]
-
+        psf_uncert = np.zeros_like(psf_image)
+        psf_uncert[psf_image > 0] = np.sqrt(psf_image[psf_image > 0]) + 0.001
+        psf_uncert[psf_image <= 0] = 1
+        psf_inv_var = 1 / psf_uncert**2
+        N = 30
         # trust-ncg , hess=(snsf.)psf_fit_hess vs L-BFGS-B
 
         # jac = True requires minimisation function to return a (fun, jac) tuple
         min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_image, psf_inv_var), 'jac': True}
+        N_pools = 10
+        pool = multiprocessing.Pool(N_pools)
+        counter = np.arange(0, N_pools)
+        iter_rep = itertools.repeat([x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg])
+        iter_group = zip(counter, iter_rep)
+        res = None
+        min_val = None
         start = timeit.default_timer()
-        res = basinhopping(psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=50, T=5,
-                           stepsize=50)
-        print res
-        print timeit.default_timer()-start
+        for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=1):
+            if min_val is None or stuff.fun < min_val:
+                res = stuff
+                min_val = stuff.fun
+        print(res)
+        print(timeit.default_timer()-start)
 
         p = res.x
-        mu_xs, mu_ys, sigmas, cks = [p[0+i*4] for i in xrange(0, int(len(p)/4))], \
-                                    [p[1+i*4] for i in xrange(0, int(len(p)/4))], \
-                                    [p[2+i*4] for i in xrange(0, int(len(p)/4))], \
-                                    [p[3+i*4] for i in xrange(0, int(len(p)/4))]
+        mu_xs, mu_ys, sigmas, cks = [p[0+i*4] for i in range(0, int(len(p)/4))], \
+                                    [p[1+i*4] for i in range(0, int(len(p)/4))], \
+                                    [p[2+i*4] for i in range(0, int(len(p)/4))], \
+                                    [p[3+i*4] for i in range(0, int(len(p)/4))]
         psf_fit = np.zeros((len(x), len(y)), float)
         for mu_x, mu_y, s, ck in zip(mu_xs, mu_ys, sigmas, cks):
             x_ = (x - mu_x).reshape(-1, 1)
@@ -442,7 +448,7 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
     gs = gridcreate('adsq', 3, len(filters), 0.8, 15)
     full_time = 0
     mog_time = 0
-    for j in xrange(0, len(filters)):
+    for j in range(0, len(filters)):
         start = timeit.default_timer()
         obm_shifted.nextObservation()
         output_galaxy_catalogues_shifted = obm_shifted.addCatalogue(shifted_galaxy_cat_file)
@@ -476,11 +482,11 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
         coords_t = np.transpose(np.array([[x], [y]]))
         # total flux in galaxy -- ensure that all units end up in flux as counts/s accordingly
         Sg = 10**(-1/2.5 * (mag - filt_zp[j]))
-        for k in xrange(0, len(mks)):
+        for k in range(0, len(mks)):
             pk = pks[k]
             Vk = Vks[k]
             mk = mks[k]
-            for m in xrange(0, len(vms)):
+            for m in range(0, len(vms)):
                 cm = cms[m]
                 vm = vms[m]
                 # Vgm = RVR^T = vm RR^T given that V = vmI
@@ -501,7 +507,7 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
         stmag, countrate = np.loadtxt(new_gal_folder + '/' + new_gal_conv_obs, comments=['\\', '|'], usecols=[4, 5])
         zp_internal = mag + 2.5 * np.log10(internal_flux)
         zp_fixed = stmag + 2.5 * np.log10(countrate)
-        print "{}: Full flux: {:.2f}, test flux: {:.2f}, initial magnitude: {:.2f}, converted initial flux (ZP={:.2f}): {:.2f}, internal flux: {:.2f}, final quoted mag/flux: {:.2f}/{:.2f} (Zp = {:.2f}), internal ZP: {:.2f}".format(filters[j].upper(), np.sum(image_full), np.sum(image_test), mag, filt_zp[j], Sg, internal_flux, stmag, countrate, zp_fixed, zp_internal)
+        print("{}: Full flux: {:.2f}, test flux: {:.2f}, initial magnitude: {:.2f}, converted initial flux (ZP={:.2f}): {:.2f}, internal flux: {:.2f}, final quoted mag/flux: {:.2f}/{:.2f} (Zp = {:.2f}), internal ZP: {:.2f}".format(filters[j].upper(), np.sum(image_full), np.sum(image_test), mag, filt_zp[j], Sg, internal_flux, stmag, countrate, zp_fixed, zp_internal))
 
         # xp, yp = np.meshgrid(np.arange(0, image_test.shape[0]), np.arange(0, image_test.shape[1]), indexing='ij')
         # x_ = (np.arange(0, image_test.shape[0]) - image_test.shape[0]/2) * pixel_scale
@@ -527,7 +533,7 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
             ax.plot(x__, y__, 'r-')
     plt.tight_layout()
     plt.savefig('out_gals/test_MoG.pdf')
-    print 'full time: {} setup, {} run; MoG time: {}'.format(full_setup, full_time, mog_time)
+    print('full time: {} setup, {} run; MoG time: {}'.format(full_setup, full_time, mog_time))
 
 
 def new_galaxy_file_creation(galaxy_cat_file):
@@ -569,7 +575,7 @@ def new_galaxy_file_creation(galaxy_cat_file):
     col_inds = np.arange(0, len(col_line))[q]
     collengths = np.diff(col_inds) - 1
     dtypes = [int, float, float, float, str, str, str, float, float, float, float, float]
-    for k in xrange(0, len(collengths)):
+    for k in range(0, len(collengths)):
         dtype_ = dtypes[k]
         collength = collengths[k]
         if dtype_ == int:
@@ -643,8 +649,8 @@ def make_figures(filters, img_sn, img_no_sn, diff_img, exptime, directory, count
     nfilts = len(filters)
     ntimes = len(times)
     gs = gridcreate('111', 3*ntimes, nfilts, 0.8, 15)
-    for k in xrange(0, ntimes):
-        for j in xrange(0, nfilts):
+    for k in range(0, ntimes):
+        for j in range(0, nfilts):
             image = img_sn[k][j]
             image_shifted = img_no_sn[j]
             image_diff = diff_img[k][j]
@@ -835,7 +841,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
            'offsets': [{'offset_id': 1, 'offset_centre': False, 'offset_ra': 0.0, 'offset_dec': 0.0, 'offset_pa': 0.0}],
            'small_subarray': True, 'seed': seedo}
     obm_shifted = ObservationModule(obs, logger=logger, out_path='temp_files')
-    for j in xrange(0, nfilts):
+    for j in range(0, nfilts):
         # here the shifted galaxy is observed...
         obm_shifted.nextObservation()
         output_galaxy_catalogues_shifted = obm_shifted.addCatalogue(shifted_galaxy_cat_file)
@@ -863,10 +869,10 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
 
     obm = ObservationModule(obs, logger=logger, out_path='temp_files', noise_floor=0)
 
-    for k in xrange(0, ntimes):
+    for k in range(0, ntimes):
         images = []
         images_diff = []
-        for j in xrange(0, nfilts):
+        for j in range(0, nfilts):
             image_shifted = images_without_sn[j]
             # TODO: add exposure and readout time so that exposures are staggered in time
             time = times[k]
@@ -948,7 +954,7 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext):
         # place upper limits on the redshift probeable, by finding the z at which each filter drops
         # out of being in overlap with the model
         z_uppers = np.empty(len(filters), float)
-        for i in xrange(0, len(filters)):
+        for i in range(0, len(filters)):
             z = 0
             while sn_model.bandoverlap(filters[i], z=z):
                 z += 0.01
@@ -1000,7 +1006,7 @@ filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
 # 1 count/s for infinite aperture, hounsell17, AB magnitudes
 filt_zp = [26.39, 26.41, 27.50, 26.35, 26.41, 25.96]
 
-for j in xrange(0, len(filters)):
+for j in range(0, len(filters)):
     f = pyfits.open('../../pandeia_data-1.0/wfirst/wfirstimager/filters/{}.fits'.format(filters[j]))
     data = f[1].data
     dispersion = [d[0] for d in data]
@@ -1022,20 +1028,20 @@ sys.exit()
 
 
 # TODO: see about downloading the jwst_backgrounds cache and putting it somewhere for offline use?
-for i in xrange(0, ngals):
+for i in range(0, ngals):
     start = timeit.default_timer()
     images_with_sn, images_without_sn, diff_images, lc_data, sn_params = \
         make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp)
-    print "make", timeit.default_timer()-start
+    print("make", timeit.default_timer()-start)
     start = timeit.default_timer()
     make_figures(filters, images_with_sn, images_without_sn, diff_images, exptime, directory, i+1,
                  times)
-    print "plot", timeit.default_timer()-start
+    print("plot", timeit.default_timer()-start)
     start = timeit.default_timer()
     lc_data_table = Table(data=lc_data, names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
-    print lc_data_table['flux']
+    print(lc_data_table['flux'])
     figtext = 'z = {:.3f}, t0 = {:.1f}, x0 = {:.5f}'.format(*sn_params)
     # TODO: expand to include all types of Sne
     fit_lc(lc_data_table, [sn_type], directory, filters, i+1, figtext)
-    print "fit", timeit.default_timer()-start
-    print sn_params
+    print("fit", timeit.default_timer()-start)
+    print(sn_params)
