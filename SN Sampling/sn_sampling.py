@@ -15,11 +15,6 @@ import sncosmo
 import astropy.units as u
 import timeit
 
-try:
-    profile
-except NameError:
-    profile = lambda x: x
-
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
     # Function that creates a blank axis canvas; each figure gets a name (or alternatively a number
@@ -66,6 +61,41 @@ def gaussian_2d(x, x_t, mu, mu_t, sigma):
     mal_dist_sq = np.matmul(p, (x - mu))[:, :, 0, 0]
     gauss_pdf = np.exp(-0.5 * mal_dist_sq) / (2 * np.pi * np.sqrt(det_sig))
     return gauss_pdf
+
+
+# flat and dark can be loaded from the stips fits file or found elsewhere, they are simply input
+# files to be multipled/added to the original data
+def add_dark(image, dark_file):
+    f = pyfits.open(dark_file)
+    d = f[0].data
+    # choice returns a random choice from np.arange(a) if just given a single integer a
+    x_i, y_j = (np.random.choice(d.shape[i]-image.shape[i]) for i in [0, 1])
+    image += d[x_i:x_i + image.shape[0], y_j:y_j + image.shape[1]]
+    return image
+
+
+def mult_flat(image, flat_file):
+    f = pyfits.open(flat_file)
+    d = f[0].data
+    # choice returns a random choice from np.arange(a) if just given a single integer a
+    x_i, y_j = (np.random.choice(d.shape[i]-image.shape[i]) for i in [0, 1])
+    image *= d[x_i:x_i + image.shape[0], y_j:y_j + image.shape[1]]
+    return image
+
+
+# read noise just takes a single read value and generates a N(0, 1) gaussian multiplying it by the
+# read value to get a N(0, read) gaussian.,
+def add_read(image, readnoise):
+    rn = readnoise * np.random.randn(image.shape)
+    image += rn
+    return image
+
+
+# if lambda is a numpy array then size is ignored and each value is used creating a new array of
+# the original shape. we could instead, for large lambda, generate a gaussian of mean 0 and
+# variance lambda; this is the more general formula allowing for low counts, however.
+def add_poisson(image):
+    return np.random.poisson(lam=image)
 
 
 def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
@@ -387,9 +417,6 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, load):
             # TODO: add exposure and readout time so that exposures are staggered in time
             time = times[k]
 
-            # We need to change the distance and apparent magnitude, so edit (zero-indexed)
-            # columns 3 and 12.
-            g = g_orig.copy()
             # get the apparent magnitude of the supernova at a given time; first get the
             # appropriate filter for the observation
             bandpass = sncosmo.get_bandpass(filters[j])
@@ -407,6 +434,17 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, load):
             # m_ia = M_ia + mu
 
             # TODO: put MoG galaxy or HST cutout here, then add a non-galaxy pure-PSF MoG
+            # TODO: add background noise.
+            # background comes from jwst_backgrounds.background, converted from MJy/sr to
+            # mJy/pixel, converted to counts through the filter and zp I guess?
+            # if cosmicrays are needed then figure out what stips does for that...
+
+            image = add_dark(image, '../err_rdrk_wfi.fits')
+            # currently what is in stips, claimed 'max ramp, lowest noise'
+            readnoise = 12
+            image = add_read(image, readnoise)
+            iamge = add_poisson(image)
+            image = mult_flat(image, '../err_flat_wfi.fits')
 
             image_diff = image - image_shifted
             images_diff.append(image_diff)
@@ -510,7 +548,7 @@ if __name__ == '__main__':
 
     times = [-10, 0, 10, 20, 30]
 
-    # mog_galaxy_test(filters, pixel_scale, exptime, filt_zp)
+    mog_galaxy_test(filters, pixel_scale, exptime, filt_zp)
 
     sys.exit()
 
