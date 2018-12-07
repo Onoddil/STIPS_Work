@@ -212,9 +212,14 @@ def psf_mog_fitting(psf_names):
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
         ax = plt.subplot(gs[2, j])
-        ratio = (psf_fit - psf_image) / psf_image
-        norm = simple_norm(ratio[psf_image > 0.001], 'linear', percent=100)
-        img = ax.imshow(ratio, origin='lower', cmap='viridis', norm=norm)
+        ratio = np.zeros_like(psf_fit)
+        ratio[psf_image != 0] = (psf_fit[psf_image != 0] - psf_image[psf_image != 0]) / \
+            psf_image[psf_image != 0]
+        ratio_ma = np.ma.array(ratio, mask=psf_image == 0)
+        norm = simple_norm(ratio[(ratio != 0) & (psf_image > 1e-3)], 'linear', percent=100)
+        cmap = plt.get_cmap('viridis')
+        cmap.set_bad('w')
+        img = ax.imshow(ratio_ma, origin='lower', cmap=cmap, norm=norm)
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('Relative Difference')
         ax.set_xlabel('x / pixel')
@@ -222,7 +227,7 @@ def psf_mog_fitting(psf_names):
 
         ax = plt.subplot(gs[3, j])
         ratio = psf_fit - psf_image
-        norm = simple_norm(ratio[psf_image > 0.001], 'linear', percent=100)
+        norm = simple_norm(ratio, 'linear', percent=100)
         img = ax.imshow(ratio, origin='lower', cmap='viridis', norm=norm)
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('Absolute Difference')
