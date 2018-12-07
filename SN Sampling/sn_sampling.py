@@ -1,11 +1,5 @@
-from __future__ import division
 import os
 import sys
-# from glob import glob
-# path = '../../STScI-STIPS'
-# sys.path.insert(1, path)
-# import stips
-# print(stips.__file__, stips.__version__)
 import matplotlib.gridspec as gridspec
 import numpy as np
 
@@ -19,12 +13,9 @@ from scipy.special import gammaincinv
 from astropy.table import Table
 from scipy.optimize import basinhopping
 
-# from stips.scene_module import SceneModule
-# from stips.observation_module import ObservationModule
-
 import sncosmo
 import astropy.units as u
-
+import timeit
 import multiprocessing
 import itertools
 
@@ -70,15 +61,19 @@ def model_number(run_minutes, run_n, run_obs, n_runs):
 
     print("{} choices, {:.0f}/{:.0f}/{:.0f} approximate minutes/hours/days".format(n_tot, time, time/60, time/60/24))
 
-# f = c/2pi s exp(-0.5 (X+Y))
-# X = (x - mux)**2/s**2
-# Y = (y - muy)**2/s**2
-# dfdmux = f X / (x - mux), dfdmuy = f Y / (y - muy), dfdc = f / c, dfds = f (X + Y - 1) / s
-# d2fdmux2 = f (X / (x - mux))**2 - f / s**2, d2fdmuy2 = f (Y / (y - muy))**2 - f / s**2
-# d2fdc2 = 0, d2fds2 = f / s**2 ((X + Y - 1)**2 + 1 - 3(X + Y))
-# d2fdmuxdmuy = f X Y / (x - mux) / (y - muy), d2fdmuxdc = f X / c / (x - mux)
-# d2fdmuydc = f Y / c / (y - muy), d2f2muxds = dfds X / (x - mux) - 2 f X / s / (x - mux),
-# d2f2muyds = dfds Y / (y - muy) - 2 f Y / s / (y - muy), d2fdcds = dfds / c
+# f = c/(2pi sx sy sqrt(1 - p**2)) *
+# exp(-0.5/(1 - p**2)*((x - mux)**2/sx**2 + (y - muy)**2/sy**2 - 2 p (x - mux)*(y - muy)/(sx*sy)))
+# = c/(2 pi sx sy sqrt(1- p**2)) exp(-0.5/(1 - p**2) A)
+# A = (x - mux)**2/sx**2 + (y - muy)**2/sy**2 - B
+# B = 2 p (x - mux) (y - muy) / (sx sy)
+# also, C = (x - mux)/sx - p (y - muy) / sy; D = (y - muy) / sy - p (x - mux) / sx
+# dfdmux = f/(sx(1 - p**2)) * C
+# dfdmuy = f/(sy(1 - p**2)) * D
+# dfdsx = f (x - mux)/(sx**2 * (1 - p**2)) * C - f / sx
+# dfdsy = f (y - muy)/(sy**2 * (1 - p**2)) * D - f / sy
+# dfdp = f p / (1 - p**2) * (1 - B/(1 - p**2) + A/(2*p))
+# dfdc = f / c
+
 
 # F = sum_i (sum_j f_ij(c_j, s_j, mux_j, muy_j, x_i, y_i) - z_i)**2
 # dFda = sum_i 2 (sum_j f_ij - z_i) dfikda (assuming no parameters are shared between individual
@@ -89,163 +84,66 @@ def model_number(run_minutes, run_n, run_obs, n_runs):
 
 
 @profile
-def psf_fit_hess(p, x, y, z, o_inv_sq):
-    mu_xs, mu_ys, sigmas, cks = np.array([p[0+i*4] for i in range(0, int(len(p)/4))]), \
-        np.array([p[1+i*4] for i in range(0, int(len(p)/4))]), \
-        np.array([p[2+i*4] for i in range(0, int(len(p)/4))]), \
-        np.array([p[3+i*4] for i in range(0, int(len(p)/4))])
-    hess = np.empty((len(p), len(p)), float)
-    # model_z is sum_j f_ij above
-    x_s, y_s, Xs, Ys = [], [], [], []
-    fs = np.zeros((len(p) // 4, len(x), len(y)), float)
-    dfdcs = np.empty_like(fs)
-    for i in range(0, len(mu_xs)):
-        mu_x, mu_y, s, ck = mu_xs[i], mu_ys[i], sigmas[i], cks[i]
-        x_ = (x - mu_x).reshape(-1, 1)
-        y_ = (y - mu_y).reshape(1, -1)
-        exp_x = np.exp(-0.5 * x_**2 / s**2)
-        exp_y = np.exp(-0.5 * y_**2 / s**2)
-        x_s.append(x_)
-        y_s.append(y_)
-        Xs.append(x_**2 / s**2)
-        Ys.append(y_**2 / s**2)
-        dfdcs[i] = 1/(2 * np.pi * s) * exp_x * exp_y
-        fs[i] = ck * dfdcs[i]
-    model_z = np.sum(fs, axis=0)
-    dz = model_z - z
-    two_o_inv_sq = 2 * o_inv_sq
-    group_terms = dz * two_o_inv_sq
-    jac_subfunc = np.empty((len(p), len(x), len(y)), float)
-    # model_z is sum_j f_ij above -- here we must calculate dfda NOT dFda; subtle difference, but
-    # important. these are the individual "mini" function differentials, not the overall function
-    # differentials!
-    for i in range(0, len(p)):
-        i_set = i // 4
-        i_in = i % 4
-        mu_x, mu_y, s, ck = mu_xs[i_set], mu_ys[i_set], sigmas[i_set], cks[i_set]
-        x_ = x_s[i_set]
-        y_ = y_s[i_set]
-        X = Xs[i_set]
-        Y = Ys[i_set]
-        f = fs[i_set]
-        # each of our four parameters in turn are mux, muy, s and c; remember we must avoid
-        # divide-by-zero errors with out differentials here and in the second-order below
-        if i_in == 0:
-            dfda = f * x_ / s**2
-        elif i_in == 1:
-            dfda = f * y_ / s**2
-        elif i_in == 2:
-            dfda = f * (X + Y - 1) / s
-        elif i_in == 3:
-            dfda = dfdcs[i_set]
-        jac_subfunc[i] = dfda
-    for i in range(0, len(p)):
-        i_set = i // 4
-        i_in = i % 4
-        # having pre-computed the jacobian we can simply call the derivative here, rather than
-        # having to worry about which i_in counter is set for which of the variables again
-        dfda = jac_subfunc[i]
-        for j in range(0, len(p)):
-            j_set = j // 4
-            j_in = j % 4
-            dfdb = jac_subfunc[j]
-            if j_set != i_set:
-                # if the parameter 'sets' are different, then d2fdadb = 0 so we drop a term from
-                # the overall function derivative d2Fdadb; function is then
-                # sum_i 2 / o**2 dfda dfdb
-                d2Fdadb = np.sum(two_o_inv_sq * dfda * dfdb)
-            else:
-                # we only have to re-compute anything for the variable pair that correspond to the
-                # same gaussian, and so we only need these parameters if i_set != j_set; they are
-                # also going to be the same so we only need one copy
-                mu_x, mu_y, s, ck = mu_xs[j_set], mu_ys[j_set], sigmas[j_set], cks[j_set]
-                x_ = x_s[j_set]
-                y_ = y_s[j_set]
-                X = Xs[j_set]
-                Y = Ys[j_set]
-                f = fs[j_set]
-                # however, we now have N**2 potential derivatives to calculate; luckily the matrix
-                # is symmetric so we only have to calculate the Nth triangular number options,
-                # remembering to check for the symmetric indices
-                if i_in == 0 and j_in == 0:
-                    d2fdadb = f / s**2 * ((x_ / s)**2 - 1)
-                elif (i_in == 0 and j_in == 1) or (i_in == 1 and j_in == 0):
-                    d2fdadb = f * x_ * y_ / s**4
-                elif (i_in == 0 and j_in == 2) or (i_in == 2 and j_in == 0):
-                    d2fdadb = f * x_ * (X + Y - 3) / s**3
-                elif (i_in == 0 and j_in == 3) or (i_in == 3 and j_in == 0):
-                    d2fdadb = dfdcs[j_set] * x_ / s**2
-                elif i_in == 1 and j_in == 1:
-                    d2fdadb = f / s**2 * ((y_ / s)**2 - 1)
-                elif (i_in == 1 and j_in == 2) or (i_in == 2 and j_in == 1):
-                    d2fdadb = f * y_ * (X + Y - 3) / s**3
-                elif (i_in == 1 and j_in == 3) or (i_in == 3 and j_in == 1):
-                    d2fdadb = dfdcs[j_set] * y_ / s**2
-                elif (i_in == 2 and j_in == 2):
-                    d2fdadb = f / s**2 * (1 + (X + Y - 1)**2 - 3 * (X + Y))
-                elif (i_in == 2 and j_in == 3) or (i_in == 3 and j_in == 2):
-                    d2fdadb = dfdcs[j_set] * (X + Y - 1) / s
-                elif i_in == 3 and j_in == 3:
-                    d2fdadb = 0
-                # in the same function the second order derivative is non-zero so must be included
-                d2Fdadb = np.sum(group_terms * d2fdadb + two_o_inv_sq * dfda * dfdb)
-            hess[i, j] = d2Fdadb
-    return hess
-
-
-@profile
 def psf_fit_min(p, x, y, z, o_inv_sq):
-    mu_xs, mu_ys, sigmas, cks = np.array([p[0+i*4] for i in range(0, int(len(p)/4))]), \
-        np.array([p[1+i*4] for i in range(0, int(len(p)/4))]), \
-        np.array([p[2+i*4] for i in range(0, int(len(p)/4))]), \
-        np.array([p[3+i*4] for i in range(0, int(len(p)/4))])
-    model_zs = np.zeros((len(p) // 4, len(x), len(y)), float)
+    mu_xs, mu_ys, s_xs, s_ys, rhos, cks = \
+        np.array([p[0+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[1+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[2+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[3+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[4+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[5+i*6] for i in range(0, int(len(p)/6))])
+
+    model_zs = np.empty((len(p) // 6, len(x), len(y)), float)
     dfdcs = np.empty_like(model_zs)
-    x_s, y_s, Xs, Ys = [], [], [], []
-    for i, (mu_x, mu_y, s, ck) in enumerate(zip(mu_xs, mu_ys, sigmas, cks)):
+    As, Bs, Cs, Ds, x_s, y_s = [], [], [], [], [], []
+    for i, (mu_x, mu_y, sx, sy, rho, ck) in enumerate(zip(mu_xs, mu_ys, s_xs, s_ys, rhos, cks)):
+        omp2 = 1 - rho**2
         x_ = (x - mu_x).reshape(-1, 1)
         y_ = (y - mu_y).reshape(1, -1)
-        exp_x = np.exp(-0.5 * x_**2 / s**2)
-        exp_y = np.exp(-0.5 * y_**2 / s**2)
+        A = x_ * y_ / (sx * sy)
+        B = (x_/sx)**2 + (y_/sy)**2 - A * 2 * rho
+        C = x_ / sx - rho * y_ / sy
+        D = y_ / sy - rho * x_ / sx
+        As.append(A)
+        Bs.append(B)
+        Cs.append(C)
+        Ds.append(D)
         x_s.append(x_)
         y_s.append(y_)
-        Xs.append(x_**2 / s**2)
-        Ys.append(y_**2 / s**2)
         # as dfdc = f / c this definition allows for the avoidance of divide-by-zero errors
-        dfdcs[i] = 1/(2 * np.pi * s) * exp_x * exp_y
+        dfdcs[i] = 1/(2 * np.pi * sx * sy * np.sqrt(omp2)) * np.exp(-0.5/omp2 * B)
         model_zs[i] = ck * dfdcs[i]
     model_z = np.sum(model_zs, axis=0)
-
     dz = model_z - z
     group_terms = 2 * dz * o_inv_sq
 
     jac = np.empty(len(p), float)
     # model_z is sum_j f_ij above
     for i in range(0, len(p)):
-        i_set = i // 4
-        i_in = i % 4
-        mu_x, mu_y, s, ck = mu_xs[i_set], mu_ys[i_set], sigmas[i_set], cks[i_set]
-        x_ = x_s[i_set]
-        y_ = y_s[i_set]
-        X = Xs[i_set]
-        Y = Ys[i_set]
+        i_set = i // 6
+        i_in = i % 6
+        mu_x, mu_y, sx, sy, rho, ck = mu_xs[i_set], mu_ys[i_set], s_xs[i_set], s_ys[i_set], \
+            rhos[i_set], cks[i_set]
+        x_, y_, A, B, C, D = x_s[i_set], y_s[i_set], As[i_set], Bs[i_set], Cs[i_set], Ds[i_set]
         f = model_zs[i_set]
-        # each of our four parameters in turn are mux, muy, s and c.
+        omp2 = 1 - rho**2
+        # each of our six parameters in turn are mux, muy, sx, sy, rho and c.
         if i_in == 0:
-            # while we can define these differentials as fX/(x-mux) for clarity we unfortunately
-            # risk a divide-by-zero error this way, so must do the full (x-mux)/s**2
-            dfda = f * x_ / s**2
+            dfda = f / (sx * omp2) * C
         elif i_in == 1:
-            dfda = f * y_ / s**2
+            dfda = f / (sy * omp2) * D
         elif i_in == 2:
-            dfda = f * (X + Y - 1) / s
+            dfda = f * x_ / (sx**2 * omp2) * C - f / sx
         elif i_in == 3:
+            dfda = f * y_ / (sy**2 * omp2) * D - f / sy
+        elif i_in == 4:
+            dfda = f * rho / omp2 * (1 - B/omp2 + A)
+        elif i_in == 5:
             dfda = dfdcs[i_set]
         # differential of sum_i (sum_j f_ij - z_i)**2 / o**2 is
         # sum_i (2 * (sum_j f_ij - z_i) * dfda / o**2)
         dFda = np.sum(group_terms * dfda)
         jac[i] = dFda
-
     # group_terms includes a two for the jacobian; remove subsequently, but computationally cheaper
     return 0.5 * np.sum(group_terms * dz), jac
 
@@ -256,24 +154,29 @@ class MyTakeStep(object):
 
     def __call__(self, x):
         s = self.stepsize
-        # each four parameter set is mux, muy, sigma, c. Whatever the stepsize is accept for
-        # mux and muy, but reduce by a factor for sigma and c
-        stepper = np.arange(0, len(x)//4+1e-10, int)
+        # each six parameter set is mux, muy, sx, sy, p, c. Whatever the stepsize is accept for
+        # mux and muy, but reduce by a factor for sigma, p and c
+        stepper = np.arange(0, len(x)//6).astype(int)
         x[0 + stepper] += np.random.uniform(-s, s, len(stepper))
         x[1 + stepper] += np.random.uniform(-s, s, len(stepper))
         x[2 + stepper] += np.random.uniform(-min(5, s/5), min(5, s/5), len(stepper))
-        x[3 + stepper] += np.random.uniform(-0.5, 0.5, len(stepper))
+        x[3 + stepper] += np.random.uniform(-min(5, s/5), min(5, s/5), len(stepper))
+        x[4 + stepper] += np.random.uniform(-0.5, 0.5, len(stepper))
+        x[5 + stepper] += np.random.uniform(-0.5, 0.5, len(stepper))
         return x
 
 
 def psf_fitting_wrapper(iterable):
-    i, (x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg) = iterable
+    np.random.seed(seed=None)
+    i, (x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg, niters) = iterable
     x0 = []
     for _ in range(0, N):
         x0 = x0 + [x_cent - 20 + np.random.random()*40, y_cent - 20 + np.random.random()*40,
-                   np.random.random()*0.5, np.random.random()]
-    res = basinhopping(psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=50, T=5,
-                       stepsize=50)
+                   np.random.random()*0.5, np.random.random()*0.5, np.random.random(),
+                   np.random.random()]
+    take_step = MyTakeStep()
+    res = basinhopping(psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=niters, T=5,
+                       stepsize=50, take_step=take_step)
 
     return res
 
@@ -281,19 +184,11 @@ def psf_fitting_wrapper(iterable):
 @profile
 def psf_mog_fitting(psf_names, pixel_scale):
     psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
-    gs = gridcreate('adsq', 3, len(psf_names), 0.8, 15)
+    gs = gridcreate('adsq', 4, len(psf_names), 0.8, 15)
     for j in range(0, len(psf_names)):
         print(j)
         f = pyfits.open(psf_names[j])
         psf_image = f[0].data[4, :, :]
-        # from photutils import IntegratedGaussianPRF
-        # psf_image = np.zeros((119, 119), float)
-        # sigma = 0.13 / pixel_scale / (2 * np.sqrt(2 * np.log(2)))
-        # x0, y0 = (psf_image.shape[0] - 1) / 2, (psf_image.shape[1] - 1) / 2
-        # psf_model = IntegratedGaussianPRF(sigma=sigma, x_0=x0, y_0=y0, flux=1)
-        # x_, y_ = np.meshgrid(np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1]),
-        #                      indexing='ij')
-        # psf_image += psf_model(x_, y_)
 
         ax = plt.subplot(gs[0, j])
         norm = simple_norm(psf_image, 'log', percent=99.9)
@@ -310,14 +205,15 @@ def psf_mog_fitting(psf_names, pixel_scale):
         psf_uncert[psf_image <= 0] = 1
         psf_inv_var = 1 / psf_uncert**2
         N = 30
-        # trust-ncg , hess=(snsf.)psf_fit_hess vs L-BFGS-B
-
-        # jac = True requires minimisation function to return a (fun, jac) tuple
-        min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_image, psf_inv_var), 'jac': True}
-        N_pools = 10
+        min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_image, psf_inv_var), 'jac': True,
+                     'bounds': [(0, len(x)-1), (0, len(y)-1), (1e-3, 10), (1e-3, 10),
+                                (1e-5, 0.999), (1e-5, None)]*N}
+        N_pools = 12
+        niters = 150
         pool = multiprocessing.Pool(N_pools)
         counter = np.arange(0, N_pools)
-        iter_rep = itertools.repeat([x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg])
+        iter_rep = itertools.repeat([x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg,
+                                     niters])
         iter_group = zip(counter, iter_rep)
         res = None
         min_val = None
@@ -330,17 +226,21 @@ def psf_mog_fitting(psf_names, pixel_scale):
         print(timeit.default_timer()-start)
 
         p = res.x
-        mu_xs, mu_ys, sigmas, cks = [p[0+i*4] for i in range(0, int(len(p)/4))], \
-                                    [p[1+i*4] for i in range(0, int(len(p)/4))], \
-                                    [p[2+i*4] for i in range(0, int(len(p)/4))], \
-                                    [p[3+i*4] for i in range(0, int(len(p)/4))]
+        mu_xs, mu_ys, s_xs, s_ys, rhos, cks = \
+            np.array([p[0+i*6] for i in range(0, int(len(p)/6))]), \
+            np.array([p[1+i*6] for i in range(0, int(len(p)/6))]), \
+            np.array([p[2+i*6] for i in range(0, int(len(p)/6))]), \
+            np.array([p[3+i*6] for i in range(0, int(len(p)/6))]), \
+            np.array([p[4+i*6] for i in range(0, int(len(p)/6))]), \
+            np.array([p[5+i*6] for i in range(0, int(len(p)/6))])
         psf_fit = np.zeros((len(x), len(y)), float)
-        for mu_x, mu_y, s, ck in zip(mu_xs, mu_ys, sigmas, cks):
+        for i, (mu_x, mu_y, sx, sy, rho, ck) in enumerate(zip(mu_xs, mu_ys, s_xs, s_ys, rhos, cks)):
+            omp2 = 1 - rho**2
             x_ = (x - mu_x).reshape(-1, 1)
             y_ = (y - mu_y).reshape(1, -1)
-            exp_x = np.exp(-0.5 * x_**2 / s**2)
-            exp_y = np.exp(-0.5 * y_**2 / s**2)
-            psf_fit = psf_fit + ck/(2 * np.pi * s) * exp_x * exp_y
+            B = 2 * rho * x_ * y_ / (sx * sy)
+            A = (x_/sx)**2 + (y_/sy)**2 - B
+            psf_fit = psf_fit + ck/(2 * np.pi * sx * sy * np.sqrt(omp2)) * np.exp(-0.5/omp2 * A)
         ax = plt.subplot(gs[1, j])
         norm = simple_norm(psf_fit, 'log', percent=99.9)
         img = ax.imshow(psf_fit, origin='lower', cmap='viridis', norm=norm)
@@ -354,6 +254,15 @@ def psf_mog_fitting(psf_names, pixel_scale):
         img = ax.imshow(ratio, origin='lower', cmap='viridis', norm=norm)
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('Relative Difference')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+
+        ax = plt.subplot(gs[3, j])
+        ratio = psf_fit - psf_image
+        norm = simple_norm(ratio[psf_image > 0.001], 'linear', percent=100)
+        img = ax.imshow(ratio, origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('Absolute Difference')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
@@ -536,115 +445,6 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
     print('full time: {} setup, {} run; MoG time: {}'.format(full_setup, full_time, mog_time))
 
 
-def new_galaxy_file_creation(galaxy_cat_file):
-    gal_cat_base, gal_cat_ext = os.path.splitext(galaxy_cat_file)
-    new_galaxy_cat_file = gal_cat_base + '_single_galaxy' + gal_cat_ext
-    f_w = open(new_galaxy_cat_file, 'w+')
-    with open(galaxy_cat_file, 'r') as f_r:
-        for line in f_r:
-            f_w.write(line)
-            if line[0] != "\\" and line[0] != "|":
-                break
-    f_w.close()
-
-    # create second version of single galaxy file, just with minorly offset ra/dec, uniformly
-    # offset by a random amount of a pixel in each direction
-
-    new_gal_cat_base, new_gal_cat_ext = os.path.splitext(new_galaxy_cat_file)
-    shifted_galaxy_cat_file = new_gal_cat_base + '_single_galaxy_shift' + new_gal_cat_ext
-    f_w = open(shifted_galaxy_cat_file, 'w+')
-    col_get_flag = 0
-    with open(new_galaxy_cat_file, 'r') as f_r:
-        for line in f_r:
-            if line[0] == "|" and col_get_flag == 0:
-                col_line = line
-                col_get_flag = 1
-            if line[0] != "\\" and line[0] != "|":
-                break
-            f_w.write(line)
-
-    g1 = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], dtype=int, usecols=[0])
-    g2 = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], dtype=float, usecols=[1, 2, 3, 7, 8, 9, 10, 11])
-    g3 = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], dtype=str, usecols=[4, 5, 6])
-
-    g1ind, g2ind, g3ind = 0, 0, 0
-    entry = ''
-    # to force columns to line up with | breaks, each column must be a specific length, the gap
-    # between the various | separators
-    q = np.array([s == "|" for s in col_line])
-    col_inds = np.arange(0, len(col_line))[q]
-    collengths = np.diff(col_inds) - 1
-    dtypes = [int, float, float, float, str, str, str, float, float, float, float, float]
-    for k in range(0, len(collengths)):
-        dtype_ = dtypes[k]
-        collength = collengths[k]
-        if dtype_ == int:
-            try:
-                read = int(g1[g1ind])
-            except IndexError:
-                read = int(g1)
-            g1ind += 1
-        elif dtype_ == float:
-            try:
-                read = float(g2[g2ind])
-            except IndexError:
-                read = float(g2)
-            g2ind += 1
-        elif dtype_ == str:
-            try:
-                read = str(g3[g3ind])
-            except IndexError:
-                read = str(g3)
-            g3ind += 1
-        # replace ra/dec, zero-indexed columns 1+2, with random <1 pixel offsets
-        if k == 1 or k == 2:
-            read += pixel_scale/3600 * (-1 + 2 * np.random.random_sample())
-            # if the string format of the position is longer than its allowed column, probably
-            # when a minus sign is added, we split the '[-]aaaaaae-bb' format at 'e', remove one
-            # 'a', and put it back together, effectively removing the least significant digit
-            if collength < len(str(read)):
-                splitter = str(read).split('e')
-                read = float(splitter[0][:-1] + 'e' + splitter[1])
-
-        entry = entry + ' {}{}'.format(read, ' ' * (collength - len(str(read))))
-    entry = entry + '\n'
-    f_w.write(entry)
-    f_w.close()
-
-    return new_galaxy_cat_file, shifted_galaxy_cat_file
-
-
-def new_star_file_creation(stellar_cat_file, g):
-    star_cat_base, star_cat_ext = os.path.splitext(stellar_cat_file)
-    new_stellar_cat_file = star_cat_base + '_single_star' + star_cat_ext
-    f_w = open(new_stellar_cat_file, 'w+')
-    col_get_flag = 0
-    with open(stellar_cat_file, 'r') as f_r:
-        for line in f_r:
-            if line[0] == "|" and col_get_flag == 0:
-                col_line = line
-                col_get_flag = 1
-            if line[0] != "\\" and line[0] != "|":
-                break
-            f_w.write(line)
-    # to force columns to line up with | breaks, each column must be a specific length, the gap
-    # between the various | separators
-    q = np.array([s == "|" for s in col_line])
-    col_inds = np.arange(0, len(col_line))[q]
-    collengths = np.diff(col_inds) - 1
-
-    entry = ''
-    dtypes = [int, float, float, float, int, float, float, float, float, int, int, float, float]
-    for k, collength, dtype in zip(g, collengths, dtypes):
-        k_ = dtype(k)
-        entry = entry + ' {}{}'.format(k_, ' ' * (collength - len(str(k_))))
-    entry = entry + '\n'
-    f_w.write(entry)
-    f_w.close()
-
-    return new_stellar_cat_file
-
-
 def make_figures(filters, img_sn, img_no_sn, diff_img, exptime, directory, counter, times):
     nfilts = len(filters)
     ntimes = len(times)
@@ -704,8 +504,7 @@ def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
     if sn_type == 'Ia':
         sn_model = sncosmo.Model('salt2-h17')
         if setflag:
-            # TODO: vary the stretch parameters as above
-            x1, c = 0.5, 0.0
+            x1, c = np.random.normal(0.4, 0.9), np.random.normal(-0.04, 0.1)
             sn_model.set(t0=t0, z=z, x1=x1, c=c)
     elif sn_type == 'Ib':
         sn_model = sncosmo.Model('s11-2005hm')
@@ -724,39 +523,26 @@ def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
     return sn_model
 
 
-def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
+def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, load):
     nfilts = len(filters)
     ntimes = len(times)
 
-    file_ = open('temp_files/creation_test.log', 'w+')
-    stream_handler = logging.StreamHandler(file_)
-    stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    logger.addHandler(stream_handler)
-
-    scm = SceneModule(logger=logger, out_path='temp_files')
-
     # assuming surface brightnesses vary between roughly mu_e = 18-23 mag/arcsec^2 (mcgaugh
-    # 1995, driver 2005, shen 2003)
+    # 1995, driver 2005, shen 2003 -- assume shen 2003 gives gaussian with mu=20.94, sigma=0.74)
 
-    np.random.seed(seed=None)
-    seedg = np.random.randint(100000)
-    galaxy = {'n_gals': 5000,
-              'z_low': 0.2, 'z_high': 1.0,
-              'rad_low': 0.3, 'rad_high': 2.5,
-              'sb_v_low': 23.0, 'sb_v_high': 18.0,
-              'distribution': 'uniform', 'clustered': False,
-              'radius': 0.0, 'radius_units': 'arcsec',
-              'offset_ra': 0.00001, 'offset_dec': 0.00001, 'seed': seedg}
-    galaxy_cat_file = scm.CreateGalaxies(galaxy)
-    new_galaxy_cat_file, shifted_galaxy_cat_file = new_galaxy_file_creation(galaxy_cat_file)
-
-    half_l_r = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[7])
-    disk_type = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[6], dtype=str)
+    mu_0 = np.random.normal(20.94, 0.74)
+    # elliptical galaxies approximated as de vaucouler (n=4) sersic profiles, spirals as
+    # exponentials (n=1). axial ratios vary 0.5-1 for ellipticals and 0.1-1 for spirals
+    rand_num = np.random.uniform()
+    if rand_num < 0.5 then n_type == 4 else 1
+    # randomly draw the ellipcity from 0.5/0.1 to 1, depending on sersic index
+    e_disk = np.random.unifor
     e_disk = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[8])
-    pa_disk = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[9])
-    n_type = 4 if disk_type == 'devauc' else 1
+    # position angle can be uniformly drawn [0, 2pi)
+    pa_disk = np.random.uniform(0, 2*np.pi)
+    # half-light radius can be uniformly drawn between two reasonable radii
+    lr_low, lr_high = 0.3, 2.5
+    half_l_r = np.random.uniform(lr_low, lr_high)
     # L(< R) / Ltot = \gamma(2n, x) / \Gamma(2n); scipy.special.gammainc is lower incomplete over
     # regular gamma function. Thus gammaincinv is the inverse to gammainc, solving
     # L(< r) / Ltot = Y, where Y is a large fraction
@@ -764,6 +550,9 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
     x_ = gammaincinv(2*n_type, y_frac)
     # however, x = bn * (R/Re)**(1/n), so we have to solve for R now, approximating bn
     offset_r = (x_ / (2*n_type - 1/3))**n_type * half_l_r
+    # redshift randomly drawn between two values uniformly
+    z_low, z_high = 0.2, 1.0
+    z = np.random.uniform(z_low, z_high)
 
     endflag = 0
     while endflag == 0:
@@ -783,19 +572,6 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
         if ((((x - p) * np.cos(t) - (y - q) * np.sin(t)) / b)**2 +
                 (((x - p) * np.sin(t) + (y - q) * np.cos(t)) / a)**2 <= 1):
             endflag = 1
-
-    stellar = {'n_stars': 10000,
-               'age_low': 1.0e7, 'age_high': 1.0e7,
-               'z_low': -2.0, 'z_high': -2.0,
-               'imf': 'powerlaw', 'alpha': -0.1,
-               'binary_fraction': 0.0,
-               'distribution': 'invpow', 'clustered': True,
-               'radius': 0.0, 'radius_units': 'pc',
-               'distance_low': 20.0, 'distance_high': 20.0,
-               'offset_ra': rand_ra, 'offset_dec': rand_dec}
-    stellar_cat_file = scm.CreatePopulation(stellar)
-
-    z = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[3])
 
     sn_model = get_sn_model(sn_type, 1, t0=0.0, z=z)
     # pretending that F125W on WFC3/IR is 2MASS J, we set the absolute magnitude of a
@@ -822,52 +598,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
     zp_array = []
     zpsys_array = []
 
-    # then we need to load this file and get the redshift z to get the distance for column
-    # 3 below, and then calculate the apparent magnitude
-    g_orig = np.loadtxt(stellar_cat_file, comments=['\\', '|'])
-    temp_fit = np.argmin(np.abs(g_orig[:, 7] - 10000))
-    g_orig = g_orig[temp_fit]
-
-    seedo = np.random.randint(100000)
-    obs = {'instrument': 'WFI',
-           'filters': [p.upper() for p in filters],
-           'detectors': 1,
-           'distortion': False,
-           'oversample': 5,
-           'pupil_mask': '',
-           'background': 'avg',
-           'observations_id': 1,
-           'exptime': exptime,
-           'offsets': [{'offset_id': 1, 'offset_centre': False, 'offset_ra': 0.0, 'offset_dec': 0.0, 'offset_pa': 0.0}],
-           'small_subarray': True, 'seed': seedo}
-    obm_shifted = ObservationModule(obs, logger=logger, out_path='temp_files')
-    for j in range(0, nfilts):
-        # here the shifted galaxy is observed...
-        obm_shifted.nextObservation()
-        output_galaxy_catalogues_shifted = obm_shifted.addCatalogue(shifted_galaxy_cat_file)
-        psf_file_shifted = obm_shifted.addError(parallel=True)
-        fits_file_shifted, mosaic_file_shifted, params = obm_shifted.finalize(mosaic=False)
-        f = pyfits.open(fits_file_shifted)
-        images_without_sn.append(f[1].data)
-
-    # as the inner loop, we need the filters in order [a, b, c, a, b, c, ...] in filt_list, so
-    # that we can simply loop them as obs.nextObservation(); we also need the filters capitalised
-    filt_list = [p.upper() for p in filters] * ntimes
-
-    seedo = np.random.randint(100000)
-    obs = {'instrument': 'WFI',
-           'filters': filt_list,
-           'detectors': 1,
-           'distortion': False,
-           'oversample': 5,
-           'pupil_mask': '',
-           'background': 'avg',
-           'observations_id': 1,
-           'exptime': exptime,
-           'offsets': [{'offset_id': 1, 'offset_centre': False, 'offset_ra': 0.0, 'offset_dec': 0.0, 'offset_pa': 0.0}],
-           'small_subarray': True, 'seed': seedo}
-
-    obm = ObservationModule(obs, logger=logger, out_path='temp_files', noise_floor=0)
+    # TODO: add a <1 pixel dithered MoG galaxy as image_shifted, or take an HST image cutout
 
     for k in range(0, ntimes):
         images = []
@@ -896,24 +627,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp):
             # M_ia = -19
             # m_ia = M_ia + mu
 
-            # if we need the 'star' of absolute magnitude M at distance dl then it has an apparent
-            # magnitude of M + dl. thus after creating the source we need to move its distance
-            # modulus and apparent magnitude by dM (the difference in absolute magnitudes)
-            dmu = m_ia - g[12]
-            g[12] = g[12] + dmu
-            mu_s = 5 * np.log10(g[3]) - 5
-            g[3] = 10**((mu_s + dmu)/5 + 1)
-
-            new_stellar_cat_file = new_star_file_creation(stellar_cat_file, g)
-
-            obm.nextObservation()
-            output_galaxy_catalogues = obm.addCatalogue(new_galaxy_cat_file)
-            output_stellar_catalogues = obm.addCatalogue(new_stellar_cat_file)
-            psf_file = obm.addError(parallel=True)
-            fits_file, mosaic_file, params = obm.finalize(mosaic=False)
-            f = pyfits.open(fits_file)
-            image = f[1].data
-            images.append(image)
+            # TODO: put MoG galaxy or HST cutout here, then add a non-galaxy pure-PSF MoG
 
             image_diff = image - image_shifted
             images_diff.append(image_diff)
@@ -992,11 +706,6 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext):
 
 # sys.exit()
 
-# TODO: track down the zero point changes in STIPS? one seems to be in pandeia somewhere
-import warnings
-import timeit
-warnings.simplefilter('ignore', RuntimeWarning)
-
 ngals = 1
 pixel_scale = 0.11  # arcsecond/pixel
 directory = 'out_gals'
@@ -1026,8 +735,6 @@ psf_mog_fitting(psf_names, pixel_scale)
 
 sys.exit()
 
-
-# TODO: see about downloading the jwst_backgrounds cache and putting it somewhere for offline use?
 for i in range(0, ngals):
     start = timeit.default_timer()
     images_with_sn, images_without_sn, diff_images, lc_data, sn_params = \
