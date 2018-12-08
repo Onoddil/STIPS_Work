@@ -131,17 +131,37 @@ class MyTakeStep(object):
 
 def psf_fitting_wrapper(iterable):
     np.random.seed(seed=None)
-    i, (x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg, niters) = iterable
-    x0 = []
-    for _ in range(0, N):
-        x0 = x0 + [x_cent - 20 + np.random.random()*40, y_cent - 20 + np.random.random()*40,
-                   np.random.random()*0.5, np.random.random()*0.5, np.random.random(),
-                   np.random.random()]
-    take_step = MyTakeStep()
-    res = basinhopping(psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=niters, T=5,
-                       stepsize=50, take_step=take_step)
+    i, (x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg, niters, x0, s, t) = iterable
+    if x0 is None:
+        x0 = []
+        for _ in range(0, N):
+            x0 = x0 + [x_cent - s + np.random.random()*2*s, y_cent - s + np.random.random()*2*s,
+                       np.random.random()*0.5, np.random.random()*0.5, np.random.random(),
+                       np.random.random()]
+    take_step = MyTakeStep(stepsize=s)
+    res = basinhopping(psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=niters, T=t,
+                       stepsize=s, take_step=take_step)
 
     return res
+
+
+def psf_fut_fun(p, x, y):
+    mu_xs, mu_ys, s_xs, s_ys, rhos, cks = \
+        np.array([p[0+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[1+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[2+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[3+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[4+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[5+i*6] for i in range(0, int(len(p)/6))])
+    psf_fit = np.zeros((len(x), len(y)), float)
+    for i, (mu_x, mu_y, sx, sy, rho, ck) in enumerate(zip(mu_xs, mu_ys, s_xs, s_ys, rhos, cks)):
+        omp2 = 1 - rho**2
+        x_ = (x - mu_x).reshape(-1, 1)
+        y_ = (y - mu_y).reshape(1, -1)
+        B = 2 * rho * x_ * y_ / (sx * sy)
+        A = (x_/sx)**2 + (y_/sy)**2 - B
+        psf_fit = psf_fit + ck/(2 * np.pi * sx * sy * np.sqrt(omp2)) * np.exp(-0.5/omp2 * A)
+    return psf_fit
 
 
 @profile
@@ -152,6 +172,10 @@ def psf_mog_fitting(psf_names):
         print(j)
         f = pyfits.open(psf_names[j])
         psf_image = f[0].data[4, :, :]
+        psf_uncert = np.zeros_like(psf_image)
+        psf_uncert[psf_image > 0] = np.sqrt(psf_image[psf_image > 0]) + 0.001
+        psf_uncert[psf_image <= 0] = 1
+        psf_inv_var = 1 / psf_uncert**2
 
         ax = plt.subplot(gs[0, j])
         norm = simple_norm(psf_image, 'log', percent=99.9)
@@ -161,26 +185,90 @@ def psf_mog_fitting(psf_names):
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
-        x, y = np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1])
-        x_cent, y_cent = np.ceil((psf_image.shape[0]-1)/2), np.ceil((psf_image.shape[1]-1)/2)
-        psf_uncert = np.zeros_like(psf_image)
-        psf_uncert[psf_image > 0] = np.sqrt(psf_image[psf_image > 0]) + 0.001
-        psf_uncert[psf_image <= 0] = 1
-        psf_inv_var = 1 / psf_uncert**2
-        N = 8
+        N = 5
         min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_image, psf_inv_var), 'jac': True,
-                     'bounds': [(0, len(x)-1), (0, len(y)-1), (1e-3, 10), (1e-3, 10),
+                     'bounds': [(x[0], x[-1]), (y[0], y[-1]), (1e-3, 10), (1e-3, 10),
                                 (1e-5, 0.999), (None, None)]*N}
         N_pools = 8
-        niters = 150
+        niters = 50
         pool = multiprocessing.Pool(N_pools)
         counter = np.arange(0, N_pools)
+        xy_step = 1
         iter_rep = itertools.repeat([x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg,
-                                     niters])
+                                     niters, x0, xy_step, temp])
         iter_group = zip(counter, iter_rep)
         res = None
         min_val = None
+        for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=1):
+            if min_val is None or stuff.fun < min_val:
+                res = stuff
+                min_val = stuff.fun
+
+        initial_res = res
+
+        psf_res = psf_image - psf_fit_fun(res.x, x, y)
+
+        x, y = np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1])
+        x_cent, y_cent = np.ceil((x[-1]+x[0])/2), np.ceil((y[-1]+y[0])/2)
+
+        xy_slice = 3
+        x_cut = np.linspace(0, psf_image.shape[0], xy_slice+1)
+        x_cut = np.array([np.floor(q).astype(int) for q in x_cut])
+        x_cut[-1] = psf_image.shape[0]
+        y_cut = np.linspace(0, psf_image.shape[1], xy_slice+1)
+        y_cut = np.array([np.floor(q).astype(int) for q in x_cut])
+        y_cut[-1] = psf_image.shape[1]
+
+        N_slice = np.ones((len(x_cut), len(y_cut)), int) * 5
+
+        x0 = []
+        N = 0
+        temp = 0.01
         start = timeit.default_timer()
+        for i_ in range(0, len(x_cut)-1):
+            for j_ in range(0, len(y_cut)-1):
+                psf_image_ = psf_res[x_cut[i_]:x_cut[i_+1], y_cut[j_]:y_cut[j_+1]]
+                psf_inv_var_ = psf_inv_var[x_cut[i_]:x_cut[i_+1], y_cut[j_]:y_cut[j_+1]]
+                x_ = x[x_cut[i_]:x_cut[i_+1]]
+                y_ = y[y_cut[j_]:y_cut[j_+1]]
+                x_cent_, y_cent_ = np.ceil((x_[-1]+x_[0])/2), np.ceil((y_[-1]+y_[0])/2)
+                N_ = N_slice[i_, j_]
+                min_kwarg = {'method': 'L-BFGS-B', 'args': (x_, y_, psf_image_, psf_inv_var_),
+                             'jac': True, 'bounds': [(x_[0], x_[-1]), (y_[0], y_[-1]), (1e-3, 10),
+                                                     (1e-3, 10), (1e-5, 0.999), (None, None)]*N_}
+                N_pools = 4
+                niters = 50
+                pool = multiprocessing.Pool(N_pools)
+                counter = np.arange(0, N_pools)
+                x0_ = None
+                xy_step = 10
+                iter_rep = itertools.repeat([x_, y_, psf_image_, psf_inv_var_, x_cent_, y_cent_,
+                                             N_, min_kwarg, niters, x0_, xy_step, temp])
+                iter_group = zip(counter, iter_rep)
+                res = None
+                min_val = None
+                for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=1):
+                    if min_val is None or stuff.fun < min_val:
+                        res = stuff
+                        min_val = stuff.fun
+                x0.extend(res.x)
+                N += N_
+
+        x0 += initial_res
+
+        min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_image, psf_inv_var), 'jac': True,
+                     'bounds': [(x[0], x[-1]), (y[0], y[-1]), (1e-3, 10), (1e-3, 10),
+                                (1e-5, 0.999), (None, None)]*N}
+        N_pools = 8
+        niters = 20
+        pool = multiprocessing.Pool(N_pools)
+        counter = np.arange(0, N_pools)
+        xy_step = 5
+        iter_rep = itertools.repeat([x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg,
+                                     niters, x0, xy_step, temp])
+        iter_group = zip(counter, iter_rep)
+        res = None
+        min_val = None
         for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=1):
             if min_val is None or stuff.fun < min_val:
                 res = stuff
@@ -189,21 +277,7 @@ def psf_mog_fitting(psf_names):
         print(timeit.default_timer()-start)
 
         p = res.x
-        mu_xs, mu_ys, s_xs, s_ys, rhos, cks = \
-            np.array([p[0+i*6] for i in range(0, int(len(p)/6))]), \
-            np.array([p[1+i*6] for i in range(0, int(len(p)/6))]), \
-            np.array([p[2+i*6] for i in range(0, int(len(p)/6))]), \
-            np.array([p[3+i*6] for i in range(0, int(len(p)/6))]), \
-            np.array([p[4+i*6] for i in range(0, int(len(p)/6))]), \
-            np.array([p[5+i*6] for i in range(0, int(len(p)/6))])
-        psf_fit = np.zeros((len(x), len(y)), float)
-        for i, (mu_x, mu_y, sx, sy, rho, ck) in enumerate(zip(mu_xs, mu_ys, s_xs, s_ys, rhos, cks)):
-            omp2 = 1 - rho**2
-            x_ = (x - mu_x).reshape(-1, 1)
-            y_ = (y - mu_y).reshape(1, -1)
-            B = 2 * rho * x_ * y_ / (sx * sy)
-            A = (x_/sx)**2 + (y_/sy)**2 - B
-            psf_fit = psf_fit + ck/(2 * np.pi * sx * sy * np.sqrt(omp2)) * np.exp(-0.5/omp2 * A)
+        psf_fit = psf_fit_fun(p, x, y)
         ax = plt.subplot(gs[1, j])
         norm = simple_norm(psf_fit, 'log', percent=99.9)
         img = ax.imshow(psf_fit, origin='lower', cmap='viridis', norm=norm)
@@ -215,7 +289,7 @@ def psf_mog_fitting(psf_names):
         ratio = np.zeros_like(psf_fit)
         ratio[psf_image != 0] = (psf_fit[psf_image != 0] - psf_image[psf_image != 0]) / \
             psf_image[psf_image != 0]
-        ratio_ma = np.ma.array(ratio, mask=psf_image == 0)
+        ratio_ma = np.ma.array(ratio, mask=(psf_image == 0) & (psf_image > 1e-3))
         norm = simple_norm(ratio[(ratio != 0) & (psf_image > 1e-3)], 'linear', percent=100)
         cmap = plt.get_cmap('viridis')
         cmap.set_bad('w')
