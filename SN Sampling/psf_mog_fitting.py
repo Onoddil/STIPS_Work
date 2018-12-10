@@ -7,6 +7,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import astropy.io.fits as pyfits
 from astropy.visualization import simple_norm
+import emcee
+import sys
+import corner
 
 try:
     profile
@@ -122,9 +125,9 @@ class MyTakeStep(object):
         stepper = np.arange(0, len(x)//6).astype(int)
         x[0 + stepper] += np.random.uniform(-s, s, len(stepper))
         x[1 + stepper] += np.random.uniform(-s, s, len(stepper))
-        x[2 + stepper] += np.random.uniform(-min(5, s/5), min(5, s/5), len(stepper))
-        x[3 + stepper] += np.random.uniform(-min(5, s/5), min(5, s/5), len(stepper))
-        x[4 + stepper] += np.random.uniform(-0.5, 0.5, len(stepper))
+        x[2 + stepper] += np.random.uniform(-0.05, 0.05, len(stepper))
+        x[3 + stepper] += np.random.uniform(-0.05, 0.05, len(stepper))
+        x[4 + stepper] += np.random.uniform(-0.1, 0.1, len(stepper))
         x[5 + stepper] += np.random.uniform(-0.5, 0.5, len(stepper))
         return x
 
@@ -136,8 +139,8 @@ def psf_fitting_wrapper(iterable):
         x0 = []
         for _ in range(0, N):
             x0 = x0 + [x_cent - s + np.random.random()*2*s, y_cent - s + np.random.random()*2*s,
-                       np.random.random()*0.5, np.random.random()*0.5, np.random.random(),
-                       np.random.random()]
+                       np.random.uniform(0.05, 0.3), np.random.uniform(0.05, 0.3),
+                       np.random.uniform(0, 0.3), np.random.random()]
     take_step = MyTakeStep(stepsize=s)
     res = basinhopping(psf_fit_min, x0, minimizer_kwargs=min_kwarg, niter=niters, T=t,
                        stepsize=s, take_step=take_step)
@@ -145,7 +148,7 @@ def psf_fitting_wrapper(iterable):
     return res
 
 
-def psf_fut_fun(p, x, y):
+def psf_fit_fun(p, x, y):
     mu_xs, mu_ys, s_xs, s_ys, rhos, cks = \
         np.array([p[0+i*6] for i in range(0, int(len(p)/6))]), \
         np.array([p[1+i*6] for i in range(0, int(len(p)/6))]), \
@@ -165,148 +168,195 @@ def psf_fut_fun(p, x, y):
 
 
 @profile
-def psf_mog_fitting(psf_names):
+def psf_fit_prob(p, x, y, z, o_inv_sq):
+    mu_xs, mu_ys, s_xs, s_ys, rhos, cks = \
+        np.array([p[0+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[1+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[2+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[3+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[4+i*6] for i in range(0, int(len(p)/6))]), \
+        np.array([p[5+i*6] for i in range(0, int(len(p)/6))])
+
+    model_z = np.zeros((len(x), len(y)), float)
+    for i, (mu_x, mu_y, sx, sy, rho, ck) in enumerate(zip(mu_xs, mu_ys, s_xs, s_ys, rhos, cks)):
+        omp2 = 1 - rho**2
+        x_ = (x - mu_x).reshape(-1, 1)
+        y_ = (y - mu_y).reshape(1, -1)
+        A = x_ * y_ / (sx * sy)
+        B = (x_/sx)**2 + (y_/sy)**2 - A * 2 * rho
+
+        model_z += ck/(2 * np.pi * sx * sy * np.sqrt(omp2)) * np.exp(-0.5/omp2 * B)
+
+    lnprob = -0.5 * np.sum((model_z - z)**2 * o_inv_sq)
+    return lnprob
+
+
+@profile
+def psf_mog_fitting(psf_names, os):
+    filts = ['F105W', 'F125W', 'F160W']
     psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
-    gs = gridcreate('adsq', 4, len(psf_names), 0.8, 15)
+    gs = gridcreate('adsq', 6, len(psf_names), 0.8, 15)
     for j in range(0, len(psf_names)):
         print(j)
         f = pyfits.open(psf_names[j])
+        # as WFC3-2016-12 suggests that fortran reads these files (x, y, N) we most likely read
+        # them as (N, y, x) with the transposition from f- to c-order, thus the psf is (y, x) shape
         psf_image = f[0].data[4, :, :]
-        psf_uncert = np.zeros_like(psf_image)
-        psf_uncert[psf_image > 0] = np.sqrt(psf_image[psf_image > 0]) + 0.001
-        psf_uncert[psf_image <= 0] = 1
-        psf_inv_var = 1 / psf_uncert**2
+        # uncertainty is sqrt(D), 1 / variance is 1/uncert**2 or 1/abs(D)
+        psf_inv_var = 1 / np.abs(psf_image + 1e-8)
+
+        x, y = np.arange(0, psf_image.shape[0])/os, np.arange(0, psf_image.shape[1])/os
+        x_cent, y_cent = np.ceil((x[-1]+x[0])/2), np.ceil((y[-1]+y[0])/2)
+        x -= x_cent
+        y -= y_cent
+        x_cent, y_cent = 0, 0
 
         ax = plt.subplot(gs[0, j])
         norm = simple_norm(psf_image, 'log', percent=99.9)
-        img = ax.imshow(psf_image, origin='lower', cmap='viridis', norm=norm)
+        # with the psf being (y, x) we do not need to transpose it to correct for pcolormesh being
+        # flipped, but our x and y need additional tweaking, as these are pixel centers, but
+        # pcolormesh wants pixel edges. we thus subtract half a pixel off each value and add a
+        # final value to the end
+        dx, dy = np.mean(np.diff(x)), np.mean(np.diff(y))
+        x_pc, y_pc = np.append(x - dx/2, x[-1] + dx/2), np.append(y - dy/2, y[-1] + dy/2)
+        img = ax.pcolormesh(x_pc, y_pc, psf_image, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('PSF Response')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
-        N = 5
-        min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_image, psf_inv_var), 'jac': True,
-                     'bounds': [(x[0], x[-1]), (y[0], y[-1]), (1e-3, 10), (1e-3, 10),
-                                (1e-5, 0.999), (None, None)]*N}
-        N_pools = 8
-        niters = 50
-        pool = multiprocessing.Pool(N_pools)
-        counter = np.arange(0, N_pools)
-        xy_step = 1
-        iter_rep = itertools.repeat([x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg,
-                                     niters, x0, xy_step, temp])
-        iter_group = zip(counter, iter_rep)
-        res = None
-        min_val = None
-        for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=1):
-            if min_val is None or stuff.fun < min_val:
-                res = stuff
-                min_val = stuff.fun
-
-        initial_res = res
-
-        psf_res = psf_image - psf_fit_fun(res.x, x, y)
-
-        x, y = np.arange(0, psf_image.shape[0]), np.arange(0, psf_image.shape[1])
-        x_cent, y_cent = np.ceil((x[-1]+x[0])/2), np.ceil((y[-1]+y[0])/2)
-
-        xy_slice = 3
-        x_cut = np.linspace(0, psf_image.shape[0], xy_slice+1)
-        x_cut = np.array([np.floor(q).astype(int) for q in x_cut])
-        x_cut[-1] = psf_image.shape[0]
-        y_cut = np.linspace(0, psf_image.shape[1], xy_slice+1)
-        y_cut = np.array([np.floor(q).astype(int) for q in x_cut])
-        y_cut[-1] = psf_image.shape[1]
-
-        N_slice = np.ones((len(x_cut), len(y_cut)), int) * 5
-
-        x0 = []
-        N = 0
         temp = 0.01
+
         start = timeit.default_timer()
-        for i_ in range(0, len(x_cut)-1):
-            for j_ in range(0, len(y_cut)-1):
-                psf_image_ = psf_res[x_cut[i_]:x_cut[i_+1], y_cut[j_]:y_cut[j_+1]]
-                psf_inv_var_ = psf_inv_var[x_cut[i_]:x_cut[i_+1], y_cut[j_]:y_cut[j_+1]]
-                x_ = x[x_cut[i_]:x_cut[i_+1]]
-                y_ = y[y_cut[j_]:y_cut[j_+1]]
-                x_cent_, y_cent_ = np.ceil((x_[-1]+x_[0])/2), np.ceil((y_[-1]+y_[0])/2)
-                N_ = N_slice[i_, j_]
-                min_kwarg = {'method': 'L-BFGS-B', 'args': (x_, y_, psf_image_, psf_inv_var_),
-                             'jac': True, 'bounds': [(x_[0], x_[-1]), (y_[0], y_[-1]), (1e-3, 10),
-                                                     (1e-3, 10), (1e-5, 0.999), (None, None)]*N_}
-                N_pools = 4
-                niters = 50
-                pool = multiprocessing.Pool(N_pools)
-                counter = np.arange(0, N_pools)
-                x0_ = None
-                xy_step = 10
-                iter_rep = itertools.repeat([x_, y_, psf_image_, psf_inv_var_, x_cent_, y_cent_,
-                                             N_, min_kwarg, niters, x0_, xy_step, temp])
-                iter_group = zip(counter, iter_rep)
-                res = None
-                min_val = None
-                for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=1):
-                    if min_val is None or stuff.fun < min_val:
-                        res = stuff
-                        min_val = stuff.fun
-                x0.extend(res.x)
-                N += N_
+        # x0_tot = []
+        # N = 5
+        # N_pools = 12
+        # niters = 15
+        # pool = multiprocessing.Pool(N_pools)
+        # counter = np.arange(0, N_pools)
+        # xy_step = 5
+        # x0 = None
+        # psf_res = psf_image
+        # for _ in range(0, 4):
+        #     min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_res, psf_inv_var), 'jac': True,
+        #                  'bounds': [(x[0], x[-1]), (y[0], y[-1]), (1e-5, 5), (1e-5, 5),
+        #                             (0.2, 0.999), (None, None)]*N}
+        #     iter_rep = itertools.repeat([x, y, psf_res, psf_inv_var, x_cent, y_cent, N, min_kwarg,
+        #                                  niters, x0, xy_step, temp])
+        #     iter_group = zip(counter, iter_rep)
+        #     res = None
+        #     min_val = None
+        #     for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=1):
+        #         if min_val is None or stuff.fun < min_val:
+        #             res = stuff
+        #             min_val = stuff.fun
+        #     psf_res = psf_res - psf_fit_fun(res.x, x, y)
+        #     x0_tot.extend(res.x)
 
-        x0 += initial_res
+        N = 6  # number of gaussians
+        nparams = 6  # mux, muy, sigx, sigy, rho, c
+        ndim = nparams*N
+        nwalkers = 100
+        s = 20
 
-        min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_image, psf_inv_var), 'jac': True,
-                     'bounds': [(x[0], x[-1]), (y[0], y[-1]), (1e-3, 10), (1e-3, 10),
-                                (1e-5, 0.999), (None, None)]*N}
-        N_pools = 8
-        niters = 20
-        pool = multiprocessing.Pool(N_pools)
-        counter = np.arange(0, N_pools)
-        xy_step = 5
-        iter_rep = itertools.repeat([x, y, psf_image, psf_inv_var, x_cent, y_cent, N, min_kwarg,
-                                     niters, x0, xy_step, temp])
-        iter_group = zip(counter, iter_rep)
-        res = None
-        min_val = None
-        for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=1):
-            if min_val is None or stuff.fun < min_val:
-                res = stuff
-                min_val = stuff.fun
-        print(res)
+        x0 = np.empty((nwalkers, ndim), float)
+        labels = []
+        for q in range(0, N):
+            labels = labels + [r'$\mu_\mathrm{x}$', r'$\mu_\mathrm{y}$', r'$\sigma_\mathrm{x}$',
+                               r'$\sigma_\mathrm{x}$', r'$\rho$', 'c']
+            x0[:, q*N:q*N+nparams] = [x_cent - s + np.random.random()*2*s, y_cent - s +
+                                   np.random.random()*2*s, np.random.uniform(0.05, 0.3),
+                                   np.random.uniform(0.05, 0.3), np.random.uniform(0, 0.3),
+                                   np.random.random()]
+
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, psf_fit_prob,
+                                        args=(x, y, psf_image, psf_inv_var), threads=8)
+        pos, prob, state = sampler.run_mcmc(x0, 20)
+        sampler.reset()
+        sampler.run_mcmc(pos, 300)
+
+        s_flatchain = sampler.flatchain
+
         print(timeit.default_timer()-start)
 
-        p = res.x
+        # should be 0.25 - 0.5
+        print('Acceptance fraction: {:.3f}'.format(np.mean(sampler.acceptance_fraction)))
+
+        gs_ = gridcreate('000', nparams, N, 0.8, 15)
+        s_chain = sampler.chain
+        for pp in range(0, nparams):
+            for ll in range(0, N):
+                ax = plt.subplot(gs[pp, ll])
+                for mm in range(0, nwalkers):
+                    ax.plot(s_chain[mm, :, ll*N + pp], 'k-', alpha=0.4)
+                ax.set_xlabel('Step')
+                ax.set_ylabel(labels[ll*N + pp])
+        plt.tight_layout()
+        plt.savefig('out_gals/chain_{}.png'.format(filts[j]))
+        plt.close()
+        plt.figure('adsq')
+
+        p = x0_tot
         psf_fit = psf_fit_fun(p, x, y)
+        print(psf_fit_min(p, x, y, psf_image, psf_inv_var)[0])
         ax = plt.subplot(gs[1, j])
         norm = simple_norm(psf_fit, 'log', percent=99.9)
-        img = ax.imshow(psf_fit, origin='lower', cmap='viridis', norm=norm)
+        img = ax.pcolormesh(x_pc, y_pc, psf_fit, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('PSF Response')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
         ax = plt.subplot(gs[2, j])
         ratio = np.zeros_like(psf_fit)
+        ratio = (psf_fit - psf_image)**2 / (np.abs(psf_image) + 1e-8)
+        ratio_ma = np.ma.array(ratio, mask=(psf_image == 0) & (psf_image > 1e-3))
+        norm = simple_norm(ratio[(ratio != 0) & (psf_image > 1e-3)], 'linear', percent=100)
+        cmap = plt.get_cmap('viridis')
+        cmap.set_bad('w', 0)
+        img = ax.pcolormesh(x_pc, y_pc, ratio_ma, cmap=cmap, norm=norm, edgecolors='face', shading='flat')
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label(r'$\chi^2$; (M - D)$^2$ / $\sigma_D^2$')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+
+        ax = plt.subplot(gs[3, j])
+        ratio = np.zeros_like(psf_fit)
         ratio[psf_image != 0] = (psf_fit[psf_image != 0] - psf_image[psf_image != 0]) / \
             psf_image[psf_image != 0]
         ratio_ma = np.ma.array(ratio, mask=(psf_image == 0) & (psf_image > 1e-3))
         norm = simple_norm(ratio[(ratio != 0) & (psf_image > 1e-3)], 'linear', percent=100)
         cmap = plt.get_cmap('viridis')
-        cmap.set_bad('w')
-        img = ax.imshow(ratio_ma, origin='lower', cmap=cmap, norm=norm)
+        cmap.set_bad('w', 0)
+        img = ax.pcolormesh(x_pc, y_pc, ratio_ma, cmap=cmap, norm=norm, edgecolors='face', shading='flat')
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('Relative Difference')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
-        ax = plt.subplot(gs[3, j])
-        ratio = psf_fit - psf_image
+        ax = plt.subplot(gs[4, j])
+        ratio = np.abs(psf_fit - psf_image)
         norm = simple_norm(ratio, 'linear', percent=100)
-        img = ax.imshow(ratio, origin='lower', cmap='viridis', norm=norm)
+        img = ax.pcolormesh(x_pc, y_pc, ratio, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('Absolute Difference')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
+
+        ax = plt.subplot(gs[5, j])
+        ratio = psf_fit - psf_image
+        norm = simple_norm(ratio, 'linear', percent=100)
+        img = ax.pcolormesh(x_pc, y_pc, ratio, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('Difference')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+
+        fig, axes = plt.subplots(ndim, ndim, figsize=(15, 15))
+        fig = corner.corner(s_flatchain, labels=labels, quantiles=[0.16, 0.50, 0.84], fig=fig, show_titles=True)
+        plt.savefig("out_gals/corner_{}.png".format(filts[j]))
+
+        plt.close()
+        plt.figure('adsq')
 
     plt.tight_layout()
     plt.savefig('out_gals/test_psf_mog.pdf')
@@ -314,4 +364,5 @@ def psf_mog_fitting(psf_names):
 
 if __name__ == '__main__':
     psf_names = ['../../pandeia_data-1.0/wfirst/wfirstimager/psfs/wfirstimager_any_{}.fits'.format(num) for num in [0.8421, 1.0697, 1.4464, 1.2476, 1.5536, 1.9068]]
-    psf_mog_fitting(psf_names)
+    oversampling = 4
+    psf_mog_fitting(psf_names, oversampling)
