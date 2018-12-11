@@ -59,13 +59,14 @@ def psf_fit_min(p, x, y, z, o_inv_sq):
         np.array([p[4+i*6] for i in range(0, int(len(p)/6))]), \
         np.array([p[5+i*6] for i in range(0, int(len(p)/6))])
 
-    model_zs = np.empty((len(p) // 6, len(x), len(y)), float)
+    model_zs = np.empty((len(p) // 6, len(y), len(x)), float)
+    model_z = np.zeros((len(y), len(x)), float)
     dfdcs = np.empty_like(model_zs)
     As, Bs, Cs, Ds, x_s, y_s = [], [], [], [], [], []
     for i, (mu_x, mu_y, sx, sy, rho, ck) in enumerate(zip(mu_xs, mu_ys, s_xs, s_ys, rhos, cks)):
         omp2 = 1 - rho**2
-        x_ = (x - mu_x).reshape(-1, 1)
-        y_ = (y - mu_y).reshape(1, -1)
+        x_ = (x - mu_x).reshape(1, -1)
+        y_ = (y - mu_y).reshape(-1, 1)
         A = x_ * y_ / (sx * sy)
         B = (x_/sx)**2 + (y_/sy)**2 - A * 2 * rho
         C = x_ / sx - rho * y_ / sy
@@ -79,7 +80,7 @@ def psf_fit_min(p, x, y, z, o_inv_sq):
         # as dfdc = f / c this definition allows for the avoidance of divide-by-zero errors
         dfdcs[i] = 1/(2 * np.pi * sx * sy * np.sqrt(omp2)) * np.exp(-0.5/omp2 * B)
         model_zs[i] = ck * dfdcs[i]
-    model_z = np.sum(model_zs, axis=0)
+        model_z += model_zs[i]
     dz = model_z - z
     group_terms = 2 * dz * o_inv_sq
 
@@ -125,10 +126,10 @@ class MyTakeStep(object):
         stepper = np.arange(0, len(x)//6).astype(int)
         x[0 + stepper] += np.random.uniform(-s, s, len(stepper))
         x[1 + stepper] += np.random.uniform(-s, s, len(stepper))
-        x[2 + stepper] += np.random.uniform(-0.05, 0.05, len(stepper))
-        x[3 + stepper] += np.random.uniform(-0.05, 0.05, len(stepper))
-        x[4 + stepper] += np.random.uniform(-0.1, 0.1, len(stepper))
-        x[5 + stepper] += np.random.uniform(-0.5, 0.5, len(stepper))
+        x[2 + stepper] += np.random.uniform(-min(s/100, 0.05), min(s/100, 0.05), len(stepper))
+        x[3 + stepper] += np.random.uniform(-min(s/100, 0.05), min(s/100, 0.05), len(stepper))
+        x[4 + stepper] += np.random.uniform(-min(s/50, 0.1), min(s/50, 0.1), len(stepper))
+        x[5 + stepper] += np.random.uniform(-min(s/10, 0.5), min(s/10, 0.5), len(stepper))
         return x
 
 
@@ -156,11 +157,11 @@ def psf_fit_fun(p, x, y):
         np.array([p[3+i*6] for i in range(0, int(len(p)/6))]), \
         np.array([p[4+i*6] for i in range(0, int(len(p)/6))]), \
         np.array([p[5+i*6] for i in range(0, int(len(p)/6))])
-    psf_fit = np.zeros((len(x), len(y)), float)
+    psf_fit = np.zeros((len(y), len(x)), float)
     for i, (mu_x, mu_y, sx, sy, rho, ck) in enumerate(zip(mu_xs, mu_ys, s_xs, s_ys, rhos, cks)):
         omp2 = 1 - rho**2
-        x_ = (x - mu_x).reshape(-1, 1)
-        y_ = (y - mu_y).reshape(1, -1)
+        x_ = (x - mu_x).reshape(1, -1)
+        y_ = (y - mu_y).reshape(-1, 1)
         B = 2 * rho * x_ * y_ / (sx * sy)
         A = (x_/sx)**2 + (y_/sy)**2 - B
         psf_fit = psf_fit + ck/(2 * np.pi * sx * sy * np.sqrt(omp2)) * np.exp(-0.5/omp2 * A)
@@ -168,32 +169,7 @@ def psf_fit_fun(p, x, y):
 
 
 @profile
-def psf_fit_prob(p, x, y, z, o_inv_sq):
-    mu_xs, mu_ys, s_xs, s_ys, rhos, cks = \
-        np.array([p[0+i*6] for i in range(0, int(len(p)/6))]), \
-        np.array([p[1+i*6] for i in range(0, int(len(p)/6))]), \
-        np.array([p[2+i*6] for i in range(0, int(len(p)/6))]), \
-        np.array([p[3+i*6] for i in range(0, int(len(p)/6))]), \
-        np.array([p[4+i*6] for i in range(0, int(len(p)/6))]), \
-        np.array([p[5+i*6] for i in range(0, int(len(p)/6))])
-
-    model_z = np.zeros((len(x), len(y)), float)
-    for i, (mu_x, mu_y, sx, sy, rho, ck) in enumerate(zip(mu_xs, mu_ys, s_xs, s_ys, rhos, cks)):
-        omp2 = 1 - rho**2
-        x_ = (x - mu_x).reshape(-1, 1)
-        y_ = (y - mu_y).reshape(1, -1)
-        A = x_ * y_ / (sx * sy)
-        B = (x_/sx)**2 + (y_/sy)**2 - A * 2 * rho
-
-        model_z += ck/(2 * np.pi * sx * sy * np.sqrt(omp2)) * np.exp(-0.5/omp2 * B)
-
-    lnprob = -0.5 * np.sum((model_z - z)**2 * o_inv_sq)
-    return lnprob
-
-
-@profile
 def psf_mog_fitting(psf_names, os):
-    filts = ['F105W', 'F125W', 'F160W']
     psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
     gs = gridcreate('adsq', 6, len(psf_names), 0.8, 15)
     for j in range(0, len(psf_names)):
@@ -203,10 +179,10 @@ def psf_mog_fitting(psf_names, os):
         # them as (N, y, x) with the transposition from f- to c-order, thus the psf is (y, x) shape
         psf_image = f[0].data[4, :, :]
         # uncertainty is sqrt(D), 1 / variance is 1/uncert**2 or 1/abs(D)
-        psf_inv_var = 1 / np.abs(psf_image + 1e-8)
+        # psf_inv_var = 1 / (np.abs(psf_image) + 1e-5)
 
         x, y = np.arange(0, psf_image.shape[0])/os, np.arange(0, psf_image.shape[1])/os
-        x_cent, y_cent = np.ceil((x[-1]+x[0])/2), np.ceil((y[-1]+y[0])/2)
+        x_cent, y_cent = (x[-1]+x[0])/2, (y[-1]+y[0])/2
         x -= x_cent
         y -= y_cent
         x_cent, y_cent = 0, 0
@@ -228,20 +204,65 @@ def psf_mog_fitting(psf_names, os):
         temp = 0.01
 
         start = timeit.default_timer()
-        # x0_tot = []
-        # N = 5
-        # N_pools = 12
-        # niters = 15
-        # pool = multiprocessing.Pool(N_pools)
-        # counter = np.arange(0, N_pools)
-        # xy_step = 5
-        # x0 = None
+        N = 0
+        N_pools = 12
+        niters = 50
+        pool = multiprocessing.Pool(N_pools)
+        counter = np.arange(0, N_pools)
+        xy_step = 5
+        x0 = []
+
+        xy_slice = 3
+        x_cut = np.linspace(0, psf_image.shape[0], xy_slice+1)
+        x_cut = np.array([np.floor(q).astype(int) for q in x_cut])
+        x_cut[-1] = psf_image.shape[0]
+        y_cut = np.linspace(0, psf_image.shape[1], xy_slice+1)
+        y_cut = np.array([np.floor(q).astype(int) for q in y_cut])
+        y_cut[-1] = psf_image.shape[1]
+
+        N_slice = np.ones((len(x_cut) - 1, len(y_cut) - 1), int) * 3
+        N_slice[1, 1] = 6
+        N_loops = np.ones((len(x_cut) - 1, len(y_cut) - 1), int) * 2
+        N_loops[1, 1] = 3
+
+        for i_ in range(0, len(x_cut)-1):
+            for j_ in range(0, len(y_cut)-1):
+                psf_image_ = np.copy(psf_image[y_cut[j_]:y_cut[j_+1], x_cut[i_]:x_cut[i_+1]])
+                # psf_inv_var_ = np.copy(psf_inv_var[y_cut[j_]:y_cut[j_+1], x_cut[i_]:x_cut[i_+1]])
+                x_ = np.copy(x[x_cut[i_]:x_cut[i_+1]])
+                y_ = np.copy(y[y_cut[j_]:y_cut[j_+1]])
+                x_cent_, y_cent_ = (x_[-1]+x_[0])/2, (y_[-1]+y_[0])/2
+                N_ = N_slice[i_, j_]
+                for loop in range(0, N_loops[i_, j_]):
+                    min_kwarg = {'method': 'L-BFGS-B', 'args': (x_, y_, psf_image_, 1),
+                                 'jac': True, 'bounds': [(x_[0], x_[-1]), (y_[0], y_[-1]),
+                                                         (1e-5, 5), (1e-5, 5), (-0.999, 0.999),
+                                                         (None, None)]*N_}
+                    x0_ = None
+                    iter_rep = itertools.repeat([x_, y_, psf_image_, 1, x_cent_,
+                                                 y_cent_, N_, min_kwarg, niters, x0_, xy_step,
+                                                 temp])
+                    iter_group = zip(counter, iter_rep)
+                    res = None
+                    min_val = None
+                    for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=1):
+                        if min_val is None or stuff.fun < min_val:
+                            res = stuff
+                            min_val = stuff.fun
+                    print(i_, j_, loop, psf_fit_min(res.x, x_, y_, psf_image_, 1)[0])
+                    x0.extend(res.x)
+                    N += N_
+                    psf_image_ -= psf_fit_fun(res.x, x_, y_)
+        # print(psf_fit_min(x0, x, y, psf_image, 1)[0])
+
+        # xy_step = 0.5
+        # niters = 5
         # psf_res = psf_image
-        # for _ in range(0, 4):
-        #     min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_res, psf_inv_var), 'jac': True,
+        # for _ in range(0, 1):
+        #     min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_res, 1), 'jac': True,
         #                  'bounds': [(x[0], x[-1]), (y[0], y[-1]), (1e-5, 5), (1e-5, 5),
-        #                             (0.2, 0.999), (None, None)]*N}
-        #     iter_rep = itertools.repeat([x, y, psf_res, psf_inv_var, x_cent, y_cent, N, min_kwarg,
+        #                             (-0.999, 0.999), (None, None)]*N}
+        #     iter_rep = itertools.repeat([x, y, psf_res, 1, x_cent, y_cent, N, min_kwarg,
         #                                  niters, x0, xy_step, temp])
         #     iter_group = zip(counter, iter_rep)
         #     res = None
@@ -250,55 +271,14 @@ def psf_mog_fitting(psf_names, os):
         #         if min_val is None or stuff.fun < min_val:
         #             res = stuff
         #             min_val = stuff.fun
-        #     psf_res = psf_res - psf_fit_fun(res.x, x, y)
-        #     x0_tot.extend(res.x)
-
-        N = 6  # number of gaussians
-        nparams = 6  # mux, muy, sigx, sigy, rho, c
-        ndim = nparams*N
-        nwalkers = 100
-        s = 20
-
-        x0 = np.empty((nwalkers, ndim), float)
-        labels = []
-        for q in range(0, N):
-            labels = labels + [r'$\mu_\mathrm{x}$', r'$\mu_\mathrm{y}$', r'$\sigma_\mathrm{x}$',
-                               r'$\sigma_\mathrm{x}$', r'$\rho$', 'c']
-            x0[:, q*N:q*N+nparams] = [x_cent - s + np.random.random()*2*s, y_cent - s +
-                                   np.random.random()*2*s, np.random.uniform(0.05, 0.3),
-                                   np.random.uniform(0.05, 0.3), np.random.uniform(0, 0.3),
-                                   np.random.random()]
-
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, psf_fit_prob,
-                                        args=(x, y, psf_image, psf_inv_var), threads=8)
-        pos, prob, state = sampler.run_mcmc(x0, 20)
-        sampler.reset()
-        sampler.run_mcmc(pos, 300)
-
-        s_flatchain = sampler.flatchain
+        #             print(min_val)
+        #     psf_res -= psf_fit_fun(res.x, x, y)
 
         print(timeit.default_timer()-start)
 
-        # should be 0.25 - 0.5
-        print('Acceptance fraction: {:.3f}'.format(np.mean(sampler.acceptance_fraction)))
-
-        gs_ = gridcreate('000', nparams, N, 0.8, 15)
-        s_chain = sampler.chain
-        for pp in range(0, nparams):
-            for ll in range(0, N):
-                ax = plt.subplot(gs[pp, ll])
-                for mm in range(0, nwalkers):
-                    ax.plot(s_chain[mm, :, ll*N + pp], 'k-', alpha=0.4)
-                ax.set_xlabel('Step')
-                ax.set_ylabel(labels[ll*N + pp])
-        plt.tight_layout()
-        plt.savefig('out_gals/chain_{}.png'.format(filts[j]))
-        plt.close()
-        plt.figure('adsq')
-
-        p = x0_tot
+        p = x0
+        print(psf_fit_min(p, x, y, psf_image, 1)[0])
         psf_fit = psf_fit_fun(p, x, y)
-        print(psf_fit_min(p, x, y, psf_image, psf_inv_var)[0])
         ax = plt.subplot(gs[1, j])
         norm = simple_norm(psf_fit, 'log', percent=99.9)
         img = ax.pcolormesh(x_pc, y_pc, psf_fit, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
@@ -308,14 +288,18 @@ def psf_mog_fitting(psf_names, os):
         ax.set_ylabel('y / pixel')
         ax = plt.subplot(gs[2, j])
         ratio = np.zeros_like(psf_fit)
-        ratio = (psf_fit - psf_image)**2 / (np.abs(psf_image) + 1e-8)
+        ratio = (psf_fit - psf_image)**2 * 1
         ratio_ma = np.ma.array(ratio, mask=(psf_image == 0) & (psf_image > 1e-3))
         norm = simple_norm(ratio[(ratio != 0) & (psf_image > 1e-3)], 'linear', percent=100)
         cmap = plt.get_cmap('viridis')
         cmap.set_bad('w', 0)
         img = ax.pcolormesh(x_pc, y_pc, ratio_ma, cmap=cmap, norm=norm, edgecolors='face', shading='flat')
+        for line in x[x_cut[1:-1]]:
+            ax.axvline(line, c='k', ls='-')
+        for line in y[y_cut[1:-1]]:
+            ax.axjline(line, c='k', ls='-')
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label(r'$\chi^2$; (M - D)$^2$ / $\sigma_D^2$')
+        cb.set_label(r'(M - D)$^2$')  # ' / $\sigma_D^2$')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
@@ -350,13 +334,6 @@ def psf_mog_fitting(psf_names, os):
         cb.set_label('Difference')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
-
-        fig, axes = plt.subplots(ndim, ndim, figsize=(15, 15))
-        fig = corner.corner(s_flatchain, labels=labels, quantiles=[0.16, 0.50, 0.84], fig=fig, show_titles=True)
-        plt.savefig("out_gals/corner_{}.png".format(filts[j]))
-
-        plt.close()
-        plt.figure('adsq')
 
     plt.tight_layout()
     plt.savefig('out_gals/test_psf_mog.pdf')
