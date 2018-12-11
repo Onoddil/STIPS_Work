@@ -7,9 +7,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import astropy.io.fits as pyfits
 from astropy.visualization import simple_norm
-import emcee
-import sys
-import corner
 
 try:
     profile
@@ -169,25 +166,60 @@ def psf_fit_fun(p, x, y):
 
 
 @profile
-def psf_mog_fitting(psf_names, os):
-    psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
-    gs = gridcreate('adsq', 6, len(psf_names), 0.8, 15)
+def psf_mog_fitting(psf_names, os, noise_removal, psf_comp_filename, cut, N_comp):
+    gs = gridcreate('adsq', 4, len(psf_names), 0.8, 15)
+    # assuming each gaussian component has mux, muy, sigx, sigy, rho, c
+    psf_comp = np.empty((len(psf_names), N_comp, 6), float)
     for j in range(0, len(psf_names)):
         print(j)
         f = pyfits.open(psf_names[j])
         # as WFC3-2016-12 suggests that fortran reads these files (x, y, N) we most likely read
         # them as (N, y, x) with the transposition from f- to c-order, thus the psf is (y, x) shape
         psf_image = f[0].data[4, :, :]
-        # uncertainty is sqrt(D), 1 / variance is 1/uncert**2 or 1/abs(D)
-        # psf_inv_var = 1 / (np.abs(psf_image) + 1e-5)
 
         x, y = np.arange(0, psf_image.shape[0])/os, np.arange(0, psf_image.shape[1])/os
         x_cent, y_cent = (x[-1]+x[0])/2, (y[-1]+y[0])/2
+        over_index_middle = 1 / 2
+        cut_int = ((x.reshape(1, -1) % 1.0 == over_index_middle) &
+                   (y.reshape(-1, 1) % 1.0 == over_index_middle))
+        # just ignore anything below cut*np.amax(image) to only fit central psf
+        total_flux, cut_flux = np.sum(psf_image[cut_int]), \
+            np.sum(psf_image[cut_int & (psf_image >= cut * np.amax(psf_image))])
         x -= x_cent
         y -= y_cent
         x_cent, y_cent = 0, 0
 
+        y_w, x_w = np.where(psf_image >= cut * np.amax(psf_image))
+        y_w0, y_w1, x_w0, x_w1 = np.amin(y_w), np.amax(y_w), np.amin(x_w), np.amax(x_w)
+
+        x_, y_ = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
+        ax = plt.subplot(gs[3, j])
+        psf_ratio = np.log10((np.abs(psf_image) / np.amax(psf_image)) + 1e-8)
+        norm = simple_norm(psf_ratio, 'linear', percent=100)
+        # with the psf being (y, x) we do not need to transpose it to correct for pcolormesh being
+        # flipped, but our x and y need additional tweaking, as these are pixel centers, but
+        # pcolormesh wants pixel edges. we thus subtract half a pixel off each value and add a
+        # final value to the end
+        dx, dy = np.mean(np.diff(x)), np.mean(np.diff(y))
+        x_pc, y_pc = np.append(x - dx/2, x[-1] + dx/2), np.append(y - dy/2, y[-1] + dy/2)
+        img = ax.pcolormesh(x_pc, y_pc, psf_ratio, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('Log Absolute Relative PSF Response')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+        ax.axvline(x_[0], c='k', ls='-')
+        ax.axvline(x_[-1], c='k', ls='-')
+        ax.axhline(y_[0], c='k', ls='-')
+        ax.axhline(y_[-1], c='k', ls='-')
+
+        psf_image = psf_image[y_w0:y_w1+1, x_w0:x_w1+1]
+        # remove any edge features with a blanket zeroing of 'noise'
+        if noise_removal:
+            psf_image[psf_image < cut * np.amax(psf_image)] = 0
+        x, y = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
+
         ax = plt.subplot(gs[0, j])
+        ax.set_title(r'Cut flux is {:.3f}\% of total flux'.format(cut_flux/total_flux*100))
         norm = simple_norm(psf_image, 'log', percent=99.9)
         # with the psf being (y, x) we do not need to transpose it to correct for pcolormesh being
         # flipped, but our x and y need additional tweaking, as these are pixel centers, but
@@ -204,79 +236,30 @@ def psf_mog_fitting(psf_names, os):
         temp = 0.01
 
         start = timeit.default_timer()
-        N = 0
         N_pools = 12
-        niters = 50
+        N_overloop = 4
+        niters = 200
         pool = multiprocessing.Pool(N_pools)
-        counter = np.arange(0, N_pools)
-        xy_step = 5
-        x0 = []
-
-        xy_slice = 3
-        x_cut = np.linspace(0, psf_image.shape[0], xy_slice+1)
-        x_cut = np.array([np.floor(q).astype(int) for q in x_cut])
-        x_cut[-1] = psf_image.shape[0]
-        y_cut = np.linspace(0, psf_image.shape[1], xy_slice+1)
-        y_cut = np.array([np.floor(q).astype(int) for q in y_cut])
-        y_cut[-1] = psf_image.shape[1]
-
-        N_slice = np.ones((len(x_cut) - 1, len(y_cut) - 1), int) * 3
-        N_slice[1, 1] = 6
-        N_loops = np.ones((len(x_cut) - 1, len(y_cut) - 1), int) * 2
-        N_loops[1, 1] = 3
-
-        for i_ in range(0, len(x_cut)-1):
-            for j_ in range(0, len(y_cut)-1):
-                psf_image_ = np.copy(psf_image[y_cut[j_]:y_cut[j_+1], x_cut[i_]:x_cut[i_+1]])
-                # psf_inv_var_ = np.copy(psf_inv_var[y_cut[j_]:y_cut[j_+1], x_cut[i_]:x_cut[i_+1]])
-                x_ = np.copy(x[x_cut[i_]:x_cut[i_+1]])
-                y_ = np.copy(y[y_cut[j_]:y_cut[j_+1]])
-                x_cent_, y_cent_ = (x_[-1]+x_[0])/2, (y_[-1]+y_[0])/2
-                N_ = N_slice[i_, j_]
-                for loop in range(0, N_loops[i_, j_]):
-                    min_kwarg = {'method': 'L-BFGS-B', 'args': (x_, y_, psf_image_, 1),
-                                 'jac': True, 'bounds': [(x_[0], x_[-1]), (y_[0], y_[-1]),
-                                                         (1e-5, 5), (1e-5, 5), (-0.999, 0.999),
-                                                         (None, None)]*N_}
-                    x0_ = None
-                    iter_rep = itertools.repeat([x_, y_, psf_image_, 1, x_cent_,
-                                                 y_cent_, N_, min_kwarg, niters, x0_, xy_step,
-                                                 temp])
-                    iter_group = zip(counter, iter_rep)
-                    res = None
-                    min_val = None
-                    for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=1):
-                        if min_val is None or stuff.fun < min_val:
-                            res = stuff
-                            min_val = stuff.fun
-                    print(i_, j_, loop, psf_fit_min(res.x, x_, y_, psf_image_, 1)[0])
-                    x0.extend(res.x)
-                    N += N_
-                    psf_image_ -= psf_fit_fun(res.x, x_, y_)
-        # print(psf_fit_min(x0, x, y, psf_image, 1)[0])
-
-        # xy_step = 0.5
-        # niters = 5
-        # psf_res = psf_image
-        # for _ in range(0, 1):
-        #     min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_res, 1), 'jac': True,
-        #                  'bounds': [(x[0], x[-1]), (y[0], y[-1]), (1e-5, 5), (1e-5, 5),
-        #                             (-0.999, 0.999), (None, None)]*N}
-        #     iter_rep = itertools.repeat([x, y, psf_res, 1, x_cent, y_cent, N, min_kwarg,
-        #                                  niters, x0, xy_step, temp])
-        #     iter_group = zip(counter, iter_rep)
-        #     res = None
-        #     min_val = None
-        #     for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=1):
-        #         if min_val is None or stuff.fun < min_val:
-        #             res = stuff
-        #             min_val = stuff.fun
-        #             print(min_val)
-        #     psf_res -= psf_fit_fun(res.x, x, y)
+        counter = np.arange(0, N_pools*N_overloop)
+        xy_step = 2
+        x0 = None
+        min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_image, 1),
+                     'jac': True, 'bounds': [(x[0], x[-1]), (y[0], y[-1]),
+                                             (1e-5, 5), (1e-5, 5), (-0.999, 0.999),
+                                             (None, None)]*N_comp}
+        iter_rep = itertools.repeat([x, y, psf_image, 1, x_cent, y_cent, N_comp, min_kwarg, niters,
+                                     x0, xy_step, temp])
+        iter_group = zip(counter, iter_rep)
+        res = None
+        min_val = None
+        for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=N_overloop):
+            if min_val is None or stuff.fun < min_val:
+                res = stuff
+                min_val = stuff.fun
 
         print(timeit.default_timer()-start)
-
-        p = x0
+        psf_comp[j, :, :] = res.x.reshape(N_comp, 6)
+        p = res.x
         print(psf_fit_min(p, x, y, psf_image, 1)[0])
         psf_fit = psf_fit_fun(p, x, y)
         ax = plt.subplot(gs[1, j])
@@ -286,24 +269,8 @@ def psf_mog_fitting(psf_names, os):
         cb.set_label('PSF Response')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
-        ax = plt.subplot(gs[2, j])
-        ratio = np.zeros_like(psf_fit)
-        ratio = (psf_fit - psf_image)**2 * 1
-        ratio_ma = np.ma.array(ratio, mask=(psf_image == 0) & (psf_image > 1e-3))
-        norm = simple_norm(ratio[(ratio != 0) & (psf_image > 1e-3)], 'linear', percent=100)
-        cmap = plt.get_cmap('viridis')
-        cmap.set_bad('w', 0)
-        img = ax.pcolormesh(x_pc, y_pc, ratio_ma, cmap=cmap, norm=norm, edgecolors='face', shading='flat')
-        for line in x[x_cut[1:-1]]:
-            ax.axvline(line, c='k', ls='-')
-        for line in y[y_cut[1:-1]]:
-            ax.axjline(line, c='k', ls='-')
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label(r'(M - D)$^2$')  # ' / $\sigma_D^2$')
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
 
-        ax = plt.subplot(gs[3, j])
+        ax = plt.subplot(gs[2, j])
         ratio = np.zeros_like(psf_fit)
         ratio[psf_image != 0] = (psf_fit[psf_image != 0] - psf_image[psf_image != 0]) / \
             psf_image[psf_image != 0]
@@ -317,29 +284,11 @@ def psf_mog_fitting(psf_names, os):
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
-        ax = plt.subplot(gs[4, j])
-        ratio = np.abs(psf_fit - psf_image)
-        norm = simple_norm(ratio, 'linear', percent=100)
-        img = ax.pcolormesh(x_pc, y_pc, ratio, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label('Absolute Difference')
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
-
-        ax = plt.subplot(gs[5, j])
-        ratio = psf_fit - psf_image
-        norm = simple_norm(ratio, 'linear', percent=100)
-        img = ax.pcolormesh(x_pc, y_pc, ratio, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label('Difference')
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
-
     plt.tight_layout()
     plt.savefig('out_gals/test_psf_mog.pdf')
 
+    np.save(psf_comp_filename, psf_comp)
+
 
 if __name__ == '__main__':
-    psf_names = ['../../pandeia_data-1.0/wfirst/wfirstimager/psfs/wfirstimager_any_{}.fits'.format(num) for num in [0.8421, 1.0697, 1.4464, 1.2476, 1.5536, 1.9068]]
-    oversampling = 4
-    psf_mog_fitting(psf_names, oversampling)
+    pass

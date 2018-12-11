@@ -15,6 +15,15 @@ import sncosmo
 import astropy.units as u
 import timeit
 
+import psf_mog_fitting as pmf
+
+path = '../../STScI-STIPS'
+sys.path.insert(1, path)
+import stips
+print stips.__file__, stips.__version__
+from stips.scene_module import SceneModule
+from stips.observation_module import ObservationModule
+
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
     # Function that creates a blank axis canvas; each figure gets a name (or alternatively a number
@@ -98,7 +107,85 @@ def add_poisson(image):
     return np.random.poisson(lam=image)
 
 
-def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
+def new_galaxy_file_creation(galaxy_cat_file):
+    gal_cat_base, gal_cat_ext = os.path.splitext(galaxy_cat_file)
+    new_galaxy_cat_file = gal_cat_base + '_single_galaxy' + gal_cat_ext
+    f_w = open(new_galaxy_cat_file, 'w+')
+    with open(galaxy_cat_file, 'r') as f_r:
+        for line in f_r:
+            f_w.write(line)
+            if line[0] != "\\" and line[0] != "|":
+                break
+    f_w.close()
+
+    # create second version of single galaxy file, just with minorly offset ra/dec, uniformly
+    # offset by a random amount of a pixel in each direction
+
+    new_gal_cat_base, new_gal_cat_ext = os.path.splitext(new_galaxy_cat_file)
+    shifted_galaxy_cat_file = new_gal_cat_base + '_single_galaxy_shift' + new_gal_cat_ext
+    f_w = open(shifted_galaxy_cat_file, 'w+')
+    col_get_flag = 0
+    with open(new_galaxy_cat_file, 'r') as f_r:
+        for line in f_r:
+            if line[0] == "|" and col_get_flag == 0:
+                col_line = line
+                col_get_flag = 1
+            if line[0] != "\\" and line[0] != "|":
+                break
+            f_w.write(line)
+
+    g1 = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], dtype=int, usecols=[0])
+    g2 = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], dtype=float, usecols=[1, 2, 3, 7, 8, 9, 10, 11])
+    g3 = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], dtype=str, usecols=[4, 5, 6])
+
+    g1ind, g2ind, g3ind = 0, 0, 0
+    entry = ''
+    # to force columns to line up with | breaks, each column must be a specific length, the gap
+    # between the various | separators
+    q = np.array([s == "|" for s in col_line])
+    col_inds = np.arange(0, len(col_line))[q]
+    collengths = np.diff(col_inds) - 1
+    dtypes = [int, float, float, float, str, str, str, float, float, float, float, float]
+    for k in xrange(0, len(collengths)):
+        dtype_ = dtypes[k]
+        collength = collengths[k]
+        if dtype_ == int:
+            try:
+                read = int(g1[g1ind])
+            except IndexError:
+                read = int(g1)
+            g1ind += 1
+        elif dtype_ == float:
+            try:
+                read = float(g2[g2ind])
+            except IndexError:
+                read = float(g2)
+            g2ind += 1
+        elif dtype_ == str:
+            try:
+                read = str(g3[g3ind])
+            except IndexError:
+                read = str(g3)
+            g3ind += 1
+        # replace ra/dec, zero-indexed columns 1+2, with random <1 pixel offsets
+        if k == 1 or k == 2:
+            read += pixel_scale/3600 * (-1 + 2 * np.random.random_sample())
+            # if the string format of the position is longer than its allowed column, probably
+            # when a minus sign is added, we split the '[-]aaaaaae-bb' format at 'e', remove one
+            # 'a', and put it back together, effectively removing the least significant digit
+            if collength < len(str(read)):
+                splitter = str(read).split('e')
+                read = float(splitter[0][:-1] + 'e' + splitter[1])
+
+        entry = entry + ' {}{}'.format(read, ' ' * (collength - len(str(read))))
+    entry = entry + '\n'
+    f_w.write(entry)
+    f_w.close()
+
+    return new_galaxy_cat_file, shifted_galaxy_cat_file
+
+
+def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp, psf_comp_filename):
     full_setup = 0
     start = timeit.default_timer()
     nfilts = len(filters)
@@ -122,7 +209,7 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
               'offset_ra': 0.00001, 'offset_dec': 0.00001, 'seed': seedg}
     galaxy_cat_file = scm.CreateGalaxies(galaxy)
     new_galaxy_cat_file, shifted_galaxy_cat_file = new_galaxy_file_creation(galaxy_cat_file)
-    obs = {'instrument': 'WFI',
+    obs = {'instrument': 'WFC3IR',
            'filters': [p.upper() for p in filters],
            'detectors': 1,
            'distortion': False,
@@ -136,12 +223,35 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
     obm_shifted = ObservationModule(obs, logger=logger, out_path='temp_files',
                                     residual={'poisson': False, 'readnoise': False, 'flat': False,
                                               'dark': False, 'cosmic': False})
+    obm_shifted2 = ObservationModule(obs, logger=logger, out_path='temp_files',
+                                     residual={'poisson': False, 'readnoise': False, 'flat': False,
+                                              'dark': False, 'cosmic': False})
 
     disk_type = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[6], dtype=str)
+    n_type = 4 if disk_type == 'devauc' else 1
     loading = np.loadtxt(new_galaxy_cat_file, comments=['\\', '|'], usecols=[1, 2, 3, 7, 8, 9, 11])
     full_setup += timeit.default_timer()-start
-    ra, dec, z, half_l_r, e_disk, pa_disk, mu = loading
-    n_type = 4 if disk_type == 'devauc' else 1
+    ra, dec, z, half_l_r, e_disk, pa_disk, mu_0 = loading
+    # mu_0 = np.random.normal(20.94, 0.74)
+    # elliptical galaxies approximated as de vaucouler (n=4) sersic profiles, spirals as
+    # exponentials (n=1). axial ratios vary 0.5-1 for ellipticals and 0.1-1 for spirals
+    # rand_num = np.random.uniform()
+    # n_type = 4 if rand_num < 0.5 else 1
+    # # randomly draw the ellipcity from 0.5/0.1 to 1, depending on sersic index
+    # e_disk = np.random.uniform(0.5 if n_type == 4 else 0.1, 1.0)
+    # # position angle can be uniformly drawn [0, 360) as we convert to radians elsewhere
+    # pa_disk = np.random.uniform(0, 360)
+    # # half-light radius can be uniformly drawn between two reasonable radii
+    # lr_low, lr_high = 0.3, 2.5
+    # half_l_r = np.random.uniform(lr_low, lr_high)
+    # L(< R) / Ltot = \gamma(2n, x) / \Gamma(2n); scipy.special.gammainc is lower incomplete over
+    # regular gamma function. Thus gammaincinv is the inverse to gammainc, solving
+    # L(< r) / Ltot = Y, where Y is a large fraction
+    y_frac = 0.75
+    x_ = gammaincinv(2*n_type, y_frac)
+    # however, x = bn * (R/Re)**(1/n), so we have to solve for R now, approximating bn
+    offset_r = (x_ / (2*n_type - 1/3))**n_type * half_l_r
+
     cm_exp = np.array([0.00077, 0.01077, 0.07313, 0.37188, 1.39727, 3.56054, 4.74340, 1.78732])
     vm_exp_sqrt = np.array([0.02393, 0.06490, 0.13580, 0.25096, 0.42942, 0.69672, 1.08879,
                             1.67294])
@@ -149,21 +259,18 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
                        6.22821, 6.15393])
     vm_dev_sqrt = np.array([0.00087, 0.00296, 0.00792, 0.01902, 0.04289, 0.09351, 0.20168, 0.44126,
                             1.01833, 2.74555])
-    pks = np.array([1])
-    # easier to define the PSF gaussian uncertainties in real space standard deviations
-    sigma_k_real = np.array([[[0.00, 0], [0, 0.00]]])  # 0.13
-    mks = np.array([[[0], [0]]])
-    Vks = (sigma_k_real / half_l_r)**2
+
+    psf_comp = np.load(psf_comp_filename)
 
     # this requires re-normalising as Hogg & Lang (2013) created profiles with unit intensity at
     # their half-light radius, with total flux for the given profile simply being the sum of the
     # MoG coefficients, cm, so we ensure that sum(cm) = 1 for normalisation purposes
-    cms = cm_dev / np.sum(cm_dev) if disk_type == 'devauc' else cm_exp / np.sum(cm_exp)
+    cms = cm_dev / np.sum(cm_dev) if n_type == 4 else cm_exp / np.sum(cm_exp)
     # Vm is always circular so this doesn't need to be a full matrix, but PSF m/V do need to
-    vms = np.array(vm_dev_sqrt)**2 if disk_type == 'devauc' else np.array(vm_exp_sqrt)**2
+    vms = np.array(vm_dev_sqrt)**2 if n_type == 4 else np.array(vm_exp_sqrt)**2
 
     # 0.75 mag is really 2.5 * log10(2), for double flux, given area is half-light radius
-    mag = mu - 2.5 * np.log10(np.pi * half_l_r**2 * e_disk) - 2.5 * np.log10(2)
+    mag = mu_0 - 2.5 * np.log10(np.pi * half_l_r**2 * e_disk) - 2.5 * np.log10(2)
 
     # since everything is defined in units of half-light radius, the "semi-major axis" is always
     # one with the semi-minor axis simply being the eccentricity (b/a, not to be confused with
@@ -172,22 +279,35 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
     t = np.radians(pa_disk)
     Rg = np.array([[-a * np.sin(t), b * np.cos(t)], [a * np.cos(t), b * np.sin(t)]])
     Vgm_unit = np.matmul(Rg, np.transpose(Rg))
-    gs = gridcreate('adsq', 3, len(filters), 0.8, 15)
+    gs = gridcreate('adsq', 6, len(filters), 0.8, 15)
     full_time = 0
     mog_time = 0
-    for j in range(0, len(filters)):
+    for j in xrange(0, len(filters)):
         start = timeit.default_timer()
         obm_shifted.nextObservation()
         output_galaxy_catalogues_shifted = obm_shifted.addCatalogue(shifted_galaxy_cat_file)
-        psf_file_shifted = obm_shifted.addError(convolve=False, parallel=False)
+        psf_file_shifted = obm_shifted.addError(convolve=True, parallel=False)
         fits_file_shifted, mosaic_file_shifted, params = obm_shifted.finalize(mosaic=False)
         f = pyfits.open(fits_file_shifted)
         image_full = f[1].data / exptime  # + 1e-8
-        full_time += timeit.default_timer()-start
 
+        full_time += timeit.default_timer()-start
         start = timeit.default_timer()
+
+        psf_c = psf_comp[j, :, :]
+        mks = psf_c[:, [0, 1]].reshape(-1, 2, 1)
+        pks = psf_c[:, 5]  # what is referred to as 'c' in psf_mog_fitting is p_k in H&L13
+        sx, sy, r = psf_c[:, 2], psf_c[:, 3], psf_c[:, 4]
+        Vks = np.array([[[sx[q]**2, r[q]*sx[q]*sy[q]], [r[q]*sx[q]*sy[q], sy[q]**2]] for
+                        q in range(0, len(sx))])
+        # covariance matrix and mean positions given in pixels, but need converting to half-light
+        mks *= (pixel_scale / half_l_r)
+        Vks *= (pixel_scale / half_l_r)
+
+        # len_image = np.ceil(2.2*offset_r).astype(int)
+        # image_test = np.zeros((len_image, len_image), float)
         image_test = np.zeros_like(image_full)
-        x_cent, y_cent = np.ceil((image_test.shape[0]-1)/2), np.ceil((image_test.shape[1]-1)/2)
+        x_cent, y_cent = np.ceil((image_test.shape[0]-1)/2)+1, np.ceil((image_test.shape[1]-1)/2)+1
         # positons should be in dimensionless but physical coordinates in terms of Re; first the
         # Xg vector needs converting from its given (ra, dec) to pixel coordiantes, to be placed
         # in the xy grid correctly (currently this just defaults to the central pixel, but it may
@@ -234,7 +354,8 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
         # x_, y_ = x_.reshape(-1, 1), y_.reshape(1, -1)
         # crit = ((x_ * np.cos(t) + y_ * np.sin(t)) / (b * half_l_r))**2 + \
         #        ((x_ * np.sin(t) - y_ * np.cos(t)) / (a * half_l_r))**2 <= 1
-
+        print(np.unravel_index(np.argmax(image_full), image_full.shape),
+              np.unravel_index(np.argmax(image_test), image_test.shape))
         for k, (im, name) in enumerate(zip([image_full, image_test, image_full/(image_full+image_test)], ['full', 'test', 'full / (full + test)'])):
             ax = plt.subplot(gs[k, j])
 
@@ -244,15 +365,95 @@ def mog_galaxy_test(filters, pixel_scale, exptime, filt_zp):
             cb.set_label('Count rate / e$^-$ s$^{-1}$' if k < 2 else 'Full / (Full + MoG)')
             ax.set_xlabel('x / pixel')
             ax.set_ylabel('y / pixel')
-            p = np.linspace(0, 2*np.pi, 200)
-            a_ = a * half_l_r / pixel_scale
-            b_ = b * half_l_r / pixel_scale
-            x__ = x_cent - np.sin(t) * a_ * np.cos(p) + np.cos(t) * b_ * np.sin(p)
-            y__ = y_cent + np.cos(t) * a_ * np.cos(p) + np.sin(t) * b_ * np.sin(p)
-            ax.plot(x__, y__, 'r-')
+            # p = np.linspace(0, 2*np.pi, 200)
+            # a_ = a * half_l_r / pixel_scale
+            # b_ = b * half_l_r / pixel_scale
+            # x__ = x_cent - np.sin(t) * a_ * np.cos(p) + np.cos(t) * b_ * np.sin(p)
+            # y__ = y_cent + np.cos(t) * a_ * np.cos(p) + np.sin(t) * b_ * np.sin(p)
+            # ax.plot(x__, y__, 'r-')
+
+        start = timeit.default_timer()
+        obm_shifted2.nextObservation()
+        output_galaxy_catalogues_shifted = obm_shifted2.addCatalogue(shifted_galaxy_cat_file)
+        psf_file_shifted = obm_shifted2.addError(convolve=False, parallel=False)
+        fits_file_shifted, mosaic_file_shifted, params = obm_shifted2.finalize(mosaic=False)
+        f = pyfits.open(fits_file_shifted)
+        image_full = f[1].data / exptime  # + 1e-8
+
+        full_time += timeit.default_timer()-start
+        start = timeit.default_timer()
+
+        # len_image = np.ceil(2.2*offset_r).astype(int)
+        # image_test = np.zeros((len_image, len_image), float)
+        image_test = np.zeros_like(image_full)
+        x_cent, y_cent = np.ceil((image_test.shape[0]-1)/2)+1, np.ceil((image_test.shape[1]-1)/2)+1
+        # positons should be in dimensionless but physical coordinates in terms of Re; first the
+        # Xg vector needs converting from its given (ra, dec) to pixel coordiantes, to be placed
+        # in the xy grid correctly (currently this just defaults to the central pixel, but it may
+        # not in the future)
+        # TODO: add central RA pixel coordinate to xg to allow for non-zero coordinates
+        xg = np.array([[(ra / pixel_scale + x_cent) * pixel_scale / half_l_r],
+                       [(dec / pixel_scale + y_cent) * pixel_scale / half_l_r]])
+        x_pos = (np.arange(0, image_test.shape[0])) * pixel_scale / half_l_r
+        y_pos = (np.arange(0, image_test.shape[1])) * pixel_scale / half_l_r
+        x, y = np.meshgrid(x_pos, y_pos, indexing='ij')
+        # n-D gaussians have mahalnobis distance (x - mu)^T Sigma^-1 (x - mu) so coords_t and m_t
+        # should be *row* vectors, and thus be shape (1, x) while coords and m should be column
+        # vectors and shape (x, 1). starting with coords, we need to add the grid of data, so if
+        # this array has shape (1, 2, y, x), and if we transpose it it'll have shape (x, y, 2, 1)
+        coords = np.transpose(np.array([[x, y]]))
+        # the "transpose" of the vector x turns from being a column vector (shape = (2, 1)) to a
+        # row vector (shape = (1, 2)), but should still have external shape (x, y), so we start
+        # with vector of (2, 1, y, x) and transpose again
+        coords_t = np.transpose(np.array([[x], [y]]))
+        # total flux in galaxy -- ensure that all units end up in flux as counts/s accordingly
+        Sg = 10**(-1/2.5 * (mag - filt_zp[j]))
+        for k in range(0, len(mks)):
+            pk = pks[k]
+            Vk = Vks[k]
+            mk = mks[k]
+            for m in range(0, len(vms)):
+                cm = cms[m]
+                vm = vms[m]
+                # Vgm = RVR^T = vm RR^T given that V = vmI
+                Vgm = vm * Vgm_unit
+                # reshape m and m_t to force propagation of arrays, remembering row vectors are
+                # (1, x) and column vectors are (x, 1) in shape
+                m = xg.reshape(1, 1, 2, 1)
+                m_t = m.reshape(1, 1, 1, 2)
+                V = Vgm
+                g_2d = gaussian_2d(coords, coords_t, m, m_t, V)
+                image_test += Sg * cm * pk * g_2d * (pixel_scale / half_l_r)**2
+        image_test += 1e-8
+        mog_time += timeit.default_timer()-start
+
+        # xp, yp = np.meshgrid(np.arange(0, image_test.shape[0]), np.arange(0, image_test.shape[1]), indexing='ij')
+        # x_ = (np.arange(0, image_test.shape[0]) - image_test.shape[0]/2) * pixel_scale
+        # y_ = (np.arange(0, image_test.shape[1]) - image_test.shape[1]/2) * pixel_scale
+        # x_, y_ = x_.reshape(-1, 1), y_.reshape(1, -1)
+        # crit = ((x_ * np.cos(t) + y_ * np.sin(t)) / (b * half_l_r))**2 + \
+        #        ((x_ * np.sin(t) - y_ * np.cos(t)) / (a * half_l_r))**2 <= 1
+
+        for k, (im, name) in enumerate(zip([image_full, image_test, image_full/(image_full+image_test)], ['full', 'test', 'full / (full + test)'])):
+            ax = plt.subplot(gs[k+3, j])
+
+            norm = simple_norm(im[im > 0], 'linear', percent=99.9)
+            img = ax.imshow(im, origin='lower', cmap='viridis', norm=norm)
+            cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+            cb.set_label('Count rate / e$^-$ s$^{-1}$' if k < 2 else 'Full / (Full + MoG)')
+            ax.set_xlabel('x / pixel')
+            ax.set_ylabel('y / pixel')
+            # p = np.linspace(0, 2*np.pi, 200)
+            # a_ = a * half_l_r / pixel_scale
+            # b_ = b * half_l_r / pixel_scale
+            # x__ = x_cent - np.sin(t) * a_ * np.cos(p) + np.cos(t) * b_ * np.sin(p)
+            # y__ = y_cent + np.cos(t) * a_ * np.cos(p) + np.sin(t) * b_ * np.sin(p)
+            # ax.plot(x__, y__, 'r-')
+        print(np.unravel_index(np.argmax(image_full), image_full.shape),
+              np.unravel_index(np.argmax(image_test), image_test.shape))
     plt.tight_layout()
     plt.savefig('out_gals/test_MoG.pdf')
-    print('full time: {} setup, {} run; MoG time: {}'.format(full_setup, full_time, mog_time))
+    print 'full time: {} setup, {} run; MoG time: {}'.format(full_setup, full_time, mog_time)
 
 
 def make_figures(filters, img_sn, img_no_sn, diff_img, exptime, directory, counter, times):
@@ -344,7 +545,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, load):
     # elliptical galaxies approximated as de vaucouler (n=4) sersic profiles, spirals as
     # exponentials (n=1). axial ratios vary 0.5-1 for ellipticals and 0.1-1 for spirals
     rand_num = np.random.uniform()
-    if rand_num < 0.5 then n_type == 4 else 1
+    n_type = 4 if rand_num < 0.5 else 1
     # randomly draw the ellipcity from 0.5/0.1 to 1, depending on sersic index
     e_disk = np.random.uniform(0.5 if n == 4 else 0.1, 1.0)
     # position angle can be uniformly drawn [0, 360) as we convert to radians elsewhere
@@ -547,15 +748,25 @@ if __name__ == '__main__':
     sn_type = 'Ia'
 
     times = [-10, 0, 10, 20, 30]
+    psf_comp_filename = 'psf_comp.npy'
 
-    mog_galaxy_test(filters, pixel_scale, exptime, filt_zp)
+    # psf_names = ['../../pandeia_data-1.0/wfirst/wfirstimager/psfs/wfirstimager_any_{}.fits'.format(num) for num in [0.8421, 1.0697, 1.4464, 1.2476, 1.5536, 1.9068]]
+    psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
+    oversampling, noise_removal, N_comp, cut = 4, 0, 7, 0.01
+    psf_comp_filename = 'psf_comp.npy'
+    # pmf.psf_mog_fitting(psf_names, oversampling, noise_removal, psf_comp_filename, cut, N_comp)
+
+    filters = ['F105W', 'F125W', 'F160W']
+    filt_zp = [27.69, 28.02, 28.19]
+    pixel_scale = 0.13
+    mog_galaxy_test([filters[2]], pixel_scale, exptime, [filt_zp[2]], psf_comp_filename)
 
     sys.exit()
 
     for i in range(0, ngals):
         start = timeit.default_timer()
         images_with_sn, images_without_sn, diff_images, lc_data, sn_params = \
-            make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp)
+            make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp_filename)
         print("make", timeit.default_timer()-start)
         start = timeit.default_timer()
         make_figures(filters, images_with_sn, images_without_sn, diff_images, exptime, directory,
