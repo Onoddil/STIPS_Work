@@ -14,6 +14,7 @@ from astropy.table import Table
 import sncosmo
 import astropy.units as u
 import timeit
+from scipy.optimize import fmin_l_bfgs_b
 
 import psf_mog_fitting as pmf
 
@@ -130,7 +131,7 @@ def mog_galaxy(pixel_scale, filt_zp, psf_c, gal_params):
                     q in range(0, len(sx))])
     # covariance matrix and mean positions given in pixels, but need converting to half-light
     mks *= (pixel_scale / half_l_r)
-    Vks *= (pixel_scale / half_l_r)
+    Vks *= (pixel_scale / half_l_r)**2
 
     len_image = np.ceil(2.2*offset_r / pixel_scale).astype(int)
     len_image = len_image + 1 if len_image % 2 == 0 else len_image
@@ -173,8 +174,10 @@ def mog_galaxy(pixel_scale, filt_zp, psf_c, gal_params):
             m_t = m.reshape(1, 1, 1, 2)
             V = Vgm + Vk
             g_2d = gaussian_2d(coords, coords_t, m, m_t, V)
-            image += Sg * cm * pk * g_2d
-
+            # having converted the covariance matrix to half-light radii, we need to account for a
+            # corresponding reverse correction so that the PSF dimensions are correct, which are
+            # defined in pure pixel scale
+            image += Sg * cm * pk * g_2d / (half_l_r / pixel_scale)**2
     return image
 
 
@@ -204,10 +207,11 @@ def mog_add_psf(image, psf_params, filt_zp, psf_c):
                     q in range(0, len(sx))])
     # convert PSF position and covariance matrix to arcseconds, from pixels
     mks *= pixel_scale
-    Vks *= pixel_scale
+    Vks *= pixel_scale**2
 
     # total flux in source -- ensure that all units end up in flux as counts/s accordingly
     Sg = 10**(-1/2.5 * (mag - filt_zp))
+    count = np.sum(image)
     for k in range(0, len(mks)):
         pk = pks[k]
         V = Vks[k]
@@ -217,8 +221,10 @@ def mog_add_psf(image, psf_params, filt_zp, psf_c):
         m = (mk + xg).reshape(1, 1, 2, 1)
         m_t = m.reshape(1, 1, 1, 2)
         g_2d = gaussian_2d(coords, coords_t, m, m_t, V)
-        image += Sg * pk * g_2d
-
+        # equivalent to the mog_galaxy version, we converted the covariance matrix to arcseconds
+        # so need to undo the unit change to get the correct dimensions, having fit for the PSF
+        # in pure pixels
+        image += Sg * pk * g_2d * pixel_scale**2
     return image
 
 
@@ -410,17 +416,18 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     # currently what is in stips, claimed 'max ramp, lowest noise'
     readnoise = 12
 
-    # take some given brightness in mag/arcsec^2 and flip to count/s. TODO: move inside filter loop
-    bkg_sb = 23.3
-    bkg_mag = bkg_sb - 2.5 * np.log10(pixel_scale**2)
-    bkg_flux = 10**(-1/2.5 * (bkg_mag - filt_zp[0]))
+    # given some zodiacal light flux, in ergcm^-2s^-1A^-1arcsec^-2, flip given the ST ZP,
+    # then convert back to flux
+    zod_flux = 2e-18  # erg/cm^2/s/A/arcsec^2
+    zod_mag = -2.5 * np.log10(zod_flux) - 21.1  # st mag system
+    zod_count = 10**(-1/2.5 * (zod_mag - filt_zp[0]))  # currently using an AB ZP...
     gal_params = [mu_0, n_type, e_disk, pa_disk, half_l_r, offset_r, Vgm_unit, cms, vms, mag]
     for j in range(0, nfilts):
         # define a random pixel offset ra/dec
         offset_ra, offset_dec = np.random.uniform(0.3, 0.7), np.random.uniform(0.3, 0.7)
         image = mog_galaxy(pixel_scale, filt_zp[j], psf_comp[j], gal_params +
                            [offset_ra, offset_dec])
-        image = add_background(image, bkg_flux)
+        image = add_background(image, zod_count)
         image = set_exptime(image, exptime)
         image = add_poisson(image)
         image = mult_flat(image, flat_img)
@@ -461,7 +468,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
 
             image = mog_add_psf(image, [rand_ra / pixel_scale, rand_dec / pixel_scale, m_ia],
                                 filt_zp[j], psf_comp[j])
-            image = add_background(image, bkg_flux)
+            image = add_background(image, zod_count)
             image = set_exptime(image, exptime)
             image = add_poisson(image)
             image = mult_flat(image, flat_img)
@@ -489,18 +496,21 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
             # TODO: swap to STmag from the AB system
             zpsys_array.append('ab')
 
+            print(m_ia, 10**(-1/2.5 * (m_ia - filt_zp[j])))
+
         images_with_sn.append(images)
         diff_images.append(images_diff)
 
     lc_data = [np.array(time_array), np.array(band_array), np.array(flux_array),
                np.array(fluxerr_array), np.array(zp_array), np.array(zpsys_array)]
 
-    sn_params = [sn_model['z'], sn_model['t0'], sn_model['x0']]
+    sn_params = [sn_model['z'], sn_model['t0'], sn_model['x0'], sn_model['x1'], sn_model['c']]
     return images_with_sn, images_without_sn, diff_images, lc_data, sn_params
 
 
-def fit_lc(lc_data, sn_types, directory, filters, counter, figtext):
+def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol):
     for sn_type in sn_types:
+        start = timeit.default_timer()
         params = ['z', 't0', 'x0']
         if sn_type == 'Ia':
             params += ['x1', 'c']
@@ -512,29 +522,30 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext):
             z = 0
             while sn_model.bandoverlap(filters[i], z=z):
                 z += 0.01
-            z_uppers[i] = z - 0.01
+            z_uppers[i] = min(2.5, z - 0.01)
         # set the bounds on z to be at most the smallest of those available by the given filters in
         # the set being fit here
-        bounds = {'z': (0.0, np.amin(z_uppers)), 'x1': (0, 1)}
-        # x1 and c bounded by 6-sigma regions (x1: x0=0.4, sigma=0.9, c: x0=-0.04, sigma = 0.1)
+        bounds = {'z': (0.0, np.amin(z_uppers))}
+        # x1 and c bounded by 6-sigma regions (x1: mu=0.4, sigma=0.9, c: mu=-0.04, sigma = 0.1)
         if sn_type == 'Ia':
             bounds.update({'x1': (-5, 5.8), 'c': (-0.64, 0.56)})
         result = None
         fitted_model = None
-        for z_init in np.linspace(0, np.amin(z_uppers), 20):
+        for z_init in np.linspace(0, np.amin(z_uppers), 50):
             sn_model.set(z=z_init)
             result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
                                                             bounds=bounds, minsnr=3, guess_z=False)
             if result is None or result_temp.chisq < result.chisq:
                 result = result_temp
                 fitted_model = fitted_model_temp
+        print('Individual fit: {:.2f}s'.format(timeit.default_timer()-start))
         print("Message:", result.message)
         print("Number of chi^2 function calls:", result.ncall)
         print("Number of degrees of freedom in fit:", result.ndof)
         print("chi^2 value at minimum:", result.chisq)
         print("model parameters:", result.param_names)
         print("best-fit values:", result.parameters)
-        ncol = 3
+
         fig = sncosmo.plot_lc(lc_data, model=fitted_model, errors=result.errors, xfigsize=15*ncol,
                               tighten_ylim=True, ncol=ncol, figtext=figtext)
         fig.tight_layout()
@@ -542,7 +553,7 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext):
 
 
 if __name__ == '__main__':
-    # run_mins, run_n, run_obs, n_runs = 2, 6, 5, 100
+    # run_mins, run_n, run_obs, n_runs = 10/60, 6, 5, 100
     # model_number(run_mins, run_n, run_obs, n_runs)
 
     # sys.exit()
@@ -569,7 +580,8 @@ if __name__ == '__main__':
     exptime = 1000  # seconds
     sn_type = 'Ia'
 
-    times = [-10, 0, 5, 10, 15, 20, 30]
+    t_low, t_high, t_interval = -10, 30, 5
+    times = np.arange(t_low, t_high, t_interval)
     psf_comp_filename = 'psf_comp.npy'
 
     # psf_names = ['../../pandeia_data-1.0/wfirst/wfirstimager/psfs/wfirstimager_any_{}.fits'.format(num) for num in [0.8421, 1.0697, 1.4464, 1.2476, 1.5536, 1.9068]]
@@ -579,8 +591,10 @@ if __name__ == '__main__':
     # pmf.psf_mog_fitting(psf_names, oversampling, noise_removal, psf_comp_filename, cut, N_comp)
 
     filters = ['F160W']  # ['F105W', 'F125W', 'F160W']
-    filt_zp = [28.19]  # [27.69, 28.02, 28.19]
+    filt_zp = [25.95]  # [27.69, 28.02, 28.19] - st; [26.27, 26.23, 25.95] - ab
     pixel_scale = 0.13
+
+    ncol = min(3, len(filters))
 
     for i in range(0, ngals):
         start = timeit.default_timer()
@@ -595,8 +609,8 @@ if __name__ == '__main__':
         lc_data_table = Table(data=lc_data,
                               names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
         print(lc_data_table['flux'])
-        figtext = 'z = {:.3f}, t0 = {:.1f}, x0 = {:.5f}'.format(*sn_params)
+        figtext = 'z = {:.3f}, t0 = {:.1f}, x0 = {:.5f}, x1 = {:.5f}, c = {:.5f}'.format(*sn_params)
         # TODO: expand to include all types of Sne
-        fit_lc(lc_data_table, [sn_type], directory, filters, i+1, figtext)
+        fit_lc(lc_data_table, [sn_type], directory, filters, i+1, figtext, ncol)
         print("fit", timeit.default_timer()-start)
         print(sn_params)
