@@ -7,11 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import astropy.io.fits as pyfits
 from astropy.visualization import simple_norm
-
-try:
-    profile
-except NameError:
-    profile = lambda x: x
+from webbpsf import wfirst
 
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
@@ -22,6 +18,22 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     plt.figure(name, figsize=(z*x, z*ratio*y))
     gs = gridspec.GridSpec(y, x, **kwargs)
     return gs
+
+
+def create_psf_image(filter, directory, oversamp):
+    # see https://webbpsf.readthedocs.io/en/stable/wfirst.html for details of detector things
+    pixelscale = 110e-3
+    wfi = wfirst.WFI(pixelscale=pixelscale/oversamp)
+    wfi.filter = filter
+    wfi.detector = 'SCA09'
+    # position can vary 4 - 4092, allowing for a 4 pixel gap
+    wfi.detector_position = (2048, 2048)
+    wfi.options['parity'] = 'odd'
+    psf = wfi.calc_psf()
+    print(psf)
+    print(psf[1].data.shape, np.sum(psf[1].data))
+    # webbpsf creates a FITS HDUList, and for now we just want the data from the image...
+    return psf[1].data
 
 
 # f = c/(2pi sx sy sqrt(1 - p**2)) *
@@ -46,7 +58,6 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
 # second term is always present across off-axis terms)
 
 
-@profile
 def psf_fit_min(p, x, y, z, o_inv_sq):
     mu_xs, mu_ys, s_xs, s_ys, rhos, cks = \
         np.array([p[0+i*6] for i in range(0, int(len(p)/6))]), \
@@ -165,7 +176,6 @@ def psf_fit_fun(p, x, y):
     return psf_fit
 
 
-@profile
 def psf_mog_fitting(psf_names, os, noise_removal, psf_comp_filename, cut, N_comp):
     gs = gridcreate('adsq', 4, len(psf_names), 0.8, 15)
     # assuming each gaussian component has mux, muy, sigx, sigy, rho, c
@@ -285,10 +295,31 @@ def psf_mog_fitting(psf_names, os, noise_removal, psf_comp_filename, cut, N_comp
         ax.set_ylabel('y / pixel')
 
     plt.tight_layout()
-    plt.savefig('out_gals/test_psf_mog.pdf')
+    plt.savefig('psf_fit/test_psf_mog.pdf')
 
     np.save(psf_comp_filename, psf_comp)
 
 
 if __name__ == '__main__':
-    pass
+    filters = ['z087']  # , 'y106', 'w149', 'j129', 'h158', 'f184']
+    psfs = []
+    oversamp = 4
+    for filter_ in filters:
+        psfs.append(create_psf_image(filter_, 'psf_fit', oversamp))
+
+    # TODO: now that we have hacked webbpsf to allow the creation of supersampled images, we need
+    # to fix the normalisation. to do this, we need to produce a 'running sum' over the
+    # oversamp**2 pixels
+
+    gs = gridcreate('a', 1, 1, 0.8, 15)
+    for i in range(0, len(filters)):
+        print(filters[i], np.sum(psfs[i]), np.amax(psfs[i]))
+        ax = plt.subplot(gs[i])
+        norm = simple_norm(psfs[i], 'log', percent=99.9)
+        img = ax.imshow(psfs[i], origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('{} PSF Response'.format(filters[i]))
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+    plt.tight_layout()
+    plt.savefig('{}/wfirst_psfs.pdf'.format('psf_fit'))

@@ -147,7 +147,7 @@ def mog_galaxy(pixel_scale, filt_zp, psf_c, gal_params):
                    [(offset_dec_pix + y_cent) * pixel_scale / half_l_r]])
     x_pos = (np.arange(0, image.shape[0])) * pixel_scale / half_l_r
     y_pos = (np.arange(0, image.shape[1])) * pixel_scale / half_l_r
-    x, y = np.meshgrid(x_pos, y_pos, indexing='ij')
+    x, y = np.meshgrid(x_pos, y_pos, indexing='xy')
     # n-D gaussians have mahalnobis distance (x - mu)^T Sigma^-1 (x - mu) so coords_t and m_t
     # should be *row* vectors, and thus be shape (1, x) while coords and m should be column
     # vectors and shape (x, 1). starting with coords, we need to add the grid of data, so if
@@ -189,7 +189,7 @@ def mog_add_psf(image, psf_params, filt_zp, psf_c):
                    [(offset_dec_pix + y_cent) * pixel_scale]])
     x_pos = (np.arange(0, image.shape[0])) * pixel_scale
     y_pos = (np.arange(0, image.shape[1])) * pixel_scale
-    x, y = np.meshgrid(x_pos, y_pos, indexing='ij')
+    x, y = np.meshgrid(x_pos, y_pos, indexing='xy')
     # n-D gaussians have mahalnobis distance (x - mu)^T Sigma^-1 (x - mu) so coords_t and m_t
     # should be *row* vectors, and thus be shape (1, x) while coords and m should be column
     # vectors and shape (x, 1). starting with coords, we need to add the grid of data, so if
@@ -240,7 +240,7 @@ def make_figures(filters, img_sn, img_no_sn, diff_img, exptime, directory, count
             norm = simple_norm(image / exptime, 'linear', percent=99.9)
 
             ax = plt.subplot(gs[0 + 3*k, j])
-            img = ax.imshow(image / exptime, origin='lower', cmap='viridis', norm=norm)
+            img = ax.imshow(image.T / exptime, origin='lower', cmap='viridis', norm=norm)
             cb = plt.colorbar(img, ax=ax, use_gridspec=True)
             cb.set_label('Count rate / e$^-$ s$^{-1}$')
             ax.set_xlabel('x / pixel')
@@ -251,7 +251,7 @@ def make_figures(filters, img_sn, img_no_sn, diff_img, exptime, directory, count
             ax.set_title(filters[j].upper())
 
             ax = plt.subplot(gs[1 + 3*k, j])
-            img = ax.imshow(image_shifted / exptime, origin='lower', cmap='viridis', norm=norm)
+            img = ax.imshow(image_shifted.T / exptime, origin='lower', cmap='viridis', norm=norm)
             cb = plt.colorbar(img, ax=ax, use_gridspec=True)
             cb.set_label('Count rate / e$^-$ s$^{-1}$')
             ax.set_xlabel('x / pixel')
@@ -263,7 +263,7 @@ def make_figures(filters, img_sn, img_no_sn, diff_img, exptime, directory, count
             norm = simple_norm(image_diff / exptime, 'linear', percent=99.9)
 
             ax = plt.subplot(gs[2 + 3*k, j])
-            img = ax.imshow(image_diff / exptime, origin='lower', cmap='viridis', norm=norm)
+            img = ax.imshow(image_diff.T / exptime, origin='lower', cmap='viridis', norm=norm)
             cb = plt.colorbar(img, ax=ax, use_gridspec=True)
             cb.set_label('Count rate / e$^-$ s$^{-1}$')
             ax.set_xlabel('x / pixel')
@@ -306,7 +306,8 @@ def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
     return sn_model
 
 
-def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp_filename):
+def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp_filename,
+                dark_img, flat_img, readnoise, t0):
     nfilts = len(filters)
     ntimes = len(times)
 
@@ -383,14 +384,12 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
                 (((x - p) * np.sin(t) + (y - q) * np.cos(t)) / a)**2 <= 1):
             endflag = 1
 
-    sn_model = get_sn_model(sn_type, 1, t0=0.0, z=z)
+    sn_model = get_sn_model(sn_type, 1, t0=t0, z=z)
     # pretending that F125W on WFC3/IR is 2MASS J, we set the absolute magnitude of a
     # type Ia supernova to J = -19.0 (meikle 2000). set supernova to a star of the closest
     # blackbody (10000K; Zheng 2017) -- code uses Johnson I magnitude but Phillips (1993) says that
     # is also ~M = -19 -- currently just setting absolute magnitudes to -19, but could change
     # if needed
-    # TODO: verfiy the transformation from 2MASS internal zero point -- 3.129E-13Wcm-2um-1 --
-    # to AB -- 31.47E-11 erg s-1 cm-2 A-1 (as per Bessel 1998) -- and how that affects the ZP
     sn_model.set_source_peakabsmag(-19.0, 'f125w', 'ab')
 
     images_with_sn = []
@@ -408,23 +407,21 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     zp_array = []
     zpsys_array = []
 
-    f = pyfits.open('../err_rdrk_wfi.fits')
-    # dark current is in counts/s, so requires correcting by the exosure time
-    dark_img = f[1].data * exptime
-    f = pyfits.open('../err_flat_wfi.fits')
-    flat_img = f[1].data
-    # currently what is in stips, claimed 'max ramp, lowest noise'
-    readnoise = 12
-
     # given some zodiacal light flux, in ergcm^-2s^-1A^-1arcsec^-2, flip given the ST ZP,
     # then convert back to flux
     zod_flux = 2e-18  # erg/cm^2/s/A/arcsec^2
     zod_mag = -2.5 * np.log10(zod_flux) - 21.1  # st mag system
     zod_count = 10**(-1/2.5 * (zod_mag - filt_zp[0]))  # currently using an AB ZP...
     gal_params = [mu_0, n_type, e_disk, pa_disk, half_l_r, offset_r, Vgm_unit, cms, vms, mag]
+    # currently assuming a simple half-pixel dither; TODO: check if this is right and update
+    second_gal_offets = np.empty((nfilts, 2), float)
     for j in range(0, nfilts):
         # define a random pixel offset ra/dec
-        offset_ra, offset_dec = np.random.uniform(0.3, 0.7), np.random.uniform(0.3, 0.7)
+        offset_ra, offset_dec = np.random.uniform(0.01, 0.99), np.random.uniform(0.01, 0.99)
+        sign = -1 if np.random.uniform(0, 1) < 0.5 else 1
+        # non-reference image should be offset by half a pixel, wrapped around [0, 1]
+        second_gal_offets[j, 0] = (offset_ra + sign * 0.5 + 1) % 1
+        second_gal_offets[j, 1] = (offset_dec + sign * 0.5 + 1) % 1
         image = mog_galaxy(pixel_scale, filt_zp[j], psf_comp[j], gal_params +
                            [offset_ra, offset_dec])
         image = add_background(image, zod_count)
@@ -435,19 +432,22 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
         image = add_read(image, readnoise)
         images_without_sn.append(image)
 
+    true_flux = []
     for k in range(0, ntimes):
         images = []
         images_diff = []
         for j in range(0, nfilts):
             image_shifted = images_without_sn[j]
             # TODO: add exposure and readout time so that exposures are staggered in time
-            time = times[k]
+            time = times[k] + t0
 
             # get the apparent magnitude of the supernova at a given time; first get the
             # appropriate filter for the observation
             bandpass = sncosmo.get_bandpass(filters[j])
             # time should be in days
             m_ia = sn_model.bandmag(bandpass, magsys='ab', time=time)
+            if np.isnan(m_ia):
+                m_ia = -2.5 * np.log10(0.01) + filt_zp[j]
             # 'star' will have a distance based on the redshift of the galaxy, given by
             # m - M = \mu = 42.38 - 5 log10(h) + 5 log10(z) + 5 log10(1+z) where h = 0.7
             # (given by H0 = 100h km/s/Mpc), based on cz = H0d, \mu = 5 log10(dL) - 5, dL = (1+z)d,
@@ -462,12 +462,13 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
             # background comes from jwst_backgrounds.background, converted from MJy/sr to
             # mJy/pixel, converted to counts through the filter and zp I guess?
             # if cosmicrays are needed then figure out what stips does for that...
-            offset_ra, offset_dec = np.random.uniform(0.3, 0.7), np.random.uniform(0.3, 0.7)
+            offset_ra, offset_dec = second_gal_offets[j, :]
             image = mog_galaxy(pixel_scale, filt_zp[j], psf_comp[j],
                                gal_params + [offset_ra, offset_dec])
-
+            countgal, galf = np.sum(image), 10**(-1/2.5 * (mag - filt_zp[j]))
             image = mog_add_psf(image, [rand_ra / pixel_scale, rand_dec / pixel_scale, m_ia],
                                 filt_zp[j], psf_comp[j])
+            countsn, snf = np.sum(image) - countgal, 10**(-1/2.5 * (m_ia - filt_zp[j]))
             image = add_background(image, zod_count)
             image = set_exptime(image, exptime)
             image = add_poisson(image)
@@ -482,8 +483,9 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
             time_array.append(time)
             band_array.append(filters[j])
 
-            xind, yind = np.unravel_index(np.argmax(image_diff), image_diff.shape)
-            N = 10
+            x_cent, y_cent = (image.shape[0]-1)/2, (image.shape[1]-1)/2
+            xind, yind = np.floor(rand_ra / pixel_scale + x_cent).astype(int), np.floor(rand_dec / pixel_scale + y_cent).astype(int)
+            N = 4
 
             # current naive sum the entire (box) 'aperture' flux of the Sn, correcting for
             # exposure time in both counts and uncertainty
@@ -496,7 +498,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
             # TODO: swap to STmag from the AB system
             zpsys_array.append('ab')
 
-            print(m_ia, 10**(-1/2.5 * (m_ia - filt_zp[j])))
+            true_flux.append(10**(-1/2.5 * (m_ia - filt_zp[j])))
 
         images_with_sn.append(images)
         diff_images.append(images_diff)
@@ -505,10 +507,10 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
                np.array(fluxerr_array), np.array(zp_array), np.array(zpsys_array)]
 
     sn_params = [sn_model['z'], sn_model['t0'], sn_model['x0'], sn_model['x1'], sn_model['c']]
-    return images_with_sn, images_without_sn, diff_images, lc_data, sn_params
+    return images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux
 
 
-def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol):
+def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr):
     for sn_type in sn_types:
         start = timeit.default_timer()
         params = ['z', 't0', 'x0']
@@ -526,30 +528,31 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol):
         # set the bounds on z to be at most the smallest of those available by the given filters in
         # the set being fit here
         bounds = {'z': (0.0, np.amin(z_uppers))}
-        # x1 and c bounded by 6-sigma regions (x1: mu=0.4, sigma=0.9, c: mu=-0.04, sigma = 0.1)
+        # x1 and c bounded by 3.5-sigma regions (x1: mu=0.4, sigma=0.9, c: mu=-0.04, sigma = 0.1)
         if sn_type == 'Ia':
-            bounds.update({'x1': (-5, 5.8), 'c': (-0.64, 0.56)})
+            bounds.update({'x1': (-2.75, 3.55), 'c': (-0.39, 0.31)})
         result = None
         fitted_model = None
-        for z_init in np.linspace(0, np.amin(z_uppers), 50):
+        for z_init in np.linspace(0, np.amin(z_uppers), 5):
             sn_model.set(z=z_init)
             result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
-                                                            bounds=bounds, minsnr=3, guess_z=False)
+                                                            bounds=bounds, minsnr=minsnr,
+                                                            guess_z=False)
             if result is None or result_temp.chisq < result.chisq:
                 result = result_temp
                 fitted_model = fitted_model_temp
-        print('Individual fit: {:.2f}s'.format(timeit.default_timer()-start))
-        print("Message:", result.message)
-        print("Number of chi^2 function calls:", result.ncall)
-        print("Number of degrees of freedom in fit:", result.ndof)
-        print("chi^2 value at minimum:", result.chisq)
-        print("model parameters:", result.param_names)
-        print("best-fit values:", result.parameters)
+        print('Fit: {:.2f}s'.format(timeit.default_timer()-start))
+        if 'success' not in result.message:
+            print("Message:", result.message)
+
+        figtext = [figtext[0], figtext[1] + '\n' + r'$\chi^2_{{\nu={}}}$ = {:.3f}'.format(result.ndof, result.chisq/result.ndof)]
 
         fig = sncosmo.plot_lc(lc_data, model=fitted_model, errors=result.errors, xfigsize=15*ncol,
                               tighten_ylim=True, ncol=ncol, figtext=figtext)
         fig.tight_layout()
         fig.savefig('{}/fit_{}_{}.pdf'.format(directory, counter, sn_type))
+
+        return result
 
 
 if __name__ == '__main__':
@@ -558,7 +561,7 @@ if __name__ == '__main__':
 
     # sys.exit()
 
-    ngals = 1
+    ngals = 10
     pixel_scale = 0.11  # arcsecond/pixel
     directory = 'out_gals'
 
@@ -581,7 +584,7 @@ if __name__ == '__main__':
     sn_type = 'Ia'
 
     t_low, t_high, t_interval = -10, 30, 5
-    times = np.arange(t_low, t_high, t_interval)
+    times = np.arange(t_low, t_high+1e-10, t_interval)
     psf_comp_filename = 'psf_comp.npy'
 
     # psf_names = ['../../pandeia_data-1.0/wfirst/wfirstimager/psfs/wfirstimager_any_{}.fits'.format(num) for num in [0.8421, 1.0697, 1.4464, 1.2476, 1.5536, 1.9068]]
@@ -594,23 +597,66 @@ if __name__ == '__main__':
     filt_zp = [25.95]  # [27.69, 28.02, 28.19] - st; [26.27, 26.23, 25.95] - ab
     pixel_scale = 0.13
 
+    f = pyfits.open('../err_rdrk_wfi.fits')
+    # dark current is in counts/s, so requires correcting by the exosure time
+    dark_img = f[1].data * exptime
+    f = pyfits.open('../err_flat_wfi.fits')
+    flat_img = f[1].data
+    # currently what is in stips, claimed 'max ramp, lowest noise'
+    readnoise = 12
+    t0 = 50000
+    minsnr = 5
+
     ncol = min(3, len(filters))
 
-    for i in range(0, ngals):
+    gs_ = gridcreate('asjhfs', 1, 5, 0.8, 15)
+    axs = [plt.subplot(gs_[i]) for i in range(0, 5)]
+    true_params = np.empty((ngals, 5), float)
+    fit_params = np.empty((ngals, 5, 2), float)
+
+    i = 0
+    while i < ngals:
         start = timeit.default_timer()
-        images_with_sn, images_without_sn, diff_images, lc_data, sn_params = \
-            make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp_filename)
-        print("make", timeit.default_timer()-start)
-        start = timeit.default_timer()
-        make_figures(filters, images_with_sn, images_without_sn, diff_images, exptime, directory,
-                     i+1, times)
-        print("plot", timeit.default_timer()-start)
-        start = timeit.default_timer()
+        images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux = \
+            make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp_filename,
+                        dark_img, flat_img, readnoise, t0)
+        print("Make: {:.2f}s".format(timeit.default_timer()-start))
         lc_data_table = Table(data=lc_data,
                               names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
-        print(lc_data_table['flux'])
-        figtext = 'z = {:.3f}, t0 = {:.1f}, x0 = {:.5f}, x1 = {:.5f}, c = {:.5f}'.format(*sn_params)
+        if not np.amax(lc_data_table['flux'].data / lc_data_table['fluxerr'].data) >= minsnr:
+            continue
+
+        figtext = 'z = {:.3f}\nt0 = {:.1f}\nx0 = {:.5f}x1 = {:.5f}\nc = {:.5f}'.format(
+                  *sn_params)
+        figtext_split = figtext.split('x1')
+        figtext = [figtext_split[0], 'x1' + figtext_split[1]]
         # TODO: expand to include all types of Sne
-        fit_lc(lc_data_table, [sn_type], directory, filters, i+1, figtext, ncol)
-        print("fit", timeit.default_timer()-start)
-        print(sn_params)
+        result = fit_lc(lc_data_table, [sn_type], directory, filters, i+1, figtext, ncol, minsnr)
+        make_figures(filters, images_with_sn, images_without_sn, diff_images, exptime,
+                     directory, i+1, times)
+
+        gs = gridcreate('09', 1, 1, 0.8, 15)
+        ax = plt.subplot(gs[0])
+        ax.errorbar(lc_data_table['time'], lc_data_table['flux'] - true_flux,
+                    yerr=lc_data_table['fluxerr'], fmt='k.')
+        ax.axhline(0, c='k', ls='--')
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Flux difference (fit - true)')
+        plt.tight_layout()
+        plt.savefig('{}/flux_ratio_{}.pdf'.format(directory, i+1))
+
+        true_params[i, :] = sn_params
+        fit_params[i, :, 0] = result.parameters
+        fit_params[i, :, 1] = [result.errors[q] for q in ['z', 't0', 'x0', 'x1', 'c']]
+
+        i += 1
+
+    plt.figure('asjhfs')
+    for i, (ax, name) in enumerate(zip(axs, ['z', 't0', 'x0', 'x1', 'c'])):
+        ax.errorbar(np.arange(1, ngals+1), fit_params[:, i, 0] - true_params[:, i],
+                    yerr=fit_params[:, i, 1], fmt='k.')
+        ax.axhline(0, c='k', ls='--')
+        ax.set_xlabel('Count')
+        ax.set_ylabel('{} difference (fit - true)'.format(name))
+    plt.tight_layout()
+    plt.savefig('{}/derived_parameter_ratio.pdf'.format(directory))
