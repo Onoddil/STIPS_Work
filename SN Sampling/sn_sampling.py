@@ -228,50 +228,58 @@ def mog_add_psf(image, psf_params, filt_zp, psf_c):
     return image
 
 
-def make_figures(filters, img_sn, img_no_sn, diff_img, exptime, directory, counter, times):
+def make_figures(filters, img_sn, img_no_sn, diff_img, exptime, directory, counter, times,
+                 random_flag):
     nfilts = len(filters)
     ntimes = len(times)
+    if random_flag:
+        ntimes_array = [np.random.choice(ntimes)]
+        nfilts_array = [np.random.choice(nfilts)]
+        ntimes, nfilts = 1, 1
+    else:
+        ntimes_array = np.arange(0, ntimes)
+        nfilts_array = np.arange(0, nfilts)
     gs = gridcreate('111', 3*ntimes, nfilts, 0.8, 15)
-    for k in range(0, ntimes):
-        for j in range(0, nfilts):
+    # if random_flag is False then k_ and k are the same, otherwise k_ should be 0 (or 0, 1, 2) if
+    # random_flag allows for a larger-than-one subset in the future, while k can be (2, 6, 10, 50),
+    # etc., striding at random
+    for k_, k in enumerate(ntimes_array):
+        for j_, j in enumerate(nfilts_array):
             image = img_sn[k][j]
             image_shifted = img_no_sn[j]
             image_diff = diff_img[k][j]
             norm = simple_norm(image / exptime, 'linear', percent=99.9)
-
-            ax = plt.subplot(gs[0 + 3*k, j])
+            ax = plt.subplot(gs[0 + 3*k_, j_])
             img = ax.imshow(image.T / exptime, origin='lower', cmap='viridis', norm=norm)
             cb = plt.colorbar(img, ax=ax, use_gridspec=True)
             cb.set_label('Count rate / e$^-$ s$^{-1}$')
             ax.set_xlabel('x / pixel')
-            if j == 0:
+            if j_ == 0:
                 ax.set_ylabel('Sn Observation, t = {} days\ny / pixel'.format(times[k]))
             else:
                 ax.set_ylabel('y / pixel')
-            ax.set_title(filters[j].upper())
-
-            ax = plt.subplot(gs[1 + 3*k, j])
+            if k_ == 0:
+                ax.set_title(filters[j].upper())
+            ax = plt.subplot(gs[1 + 3*k_, j_])
             img = ax.imshow(image_shifted.T / exptime, origin='lower', cmap='viridis', norm=norm)
             cb = plt.colorbar(img, ax=ax, use_gridspec=True)
             cb.set_label('Count rate / e$^-$ s$^{-1}$')
             ax.set_xlabel('x / pixel')
-            if j == 0:
+            if j_ == 0:
                 ax.set_ylabel('Sn Reference\ny / pixel')
             else:
                 ax.set_ylabel('y / pixel')
-
             norm = simple_norm(image_diff / exptime, 'linear', percent=99.9)
 
-            ax = plt.subplot(gs[2 + 3*k, j])
+            ax = plt.subplot(gs[2 + 3*k_, j_])
             img = ax.imshow(image_diff.T / exptime, origin='lower', cmap='viridis', norm=norm)
             cb = plt.colorbar(img, ax=ax, use_gridspec=True)
             cb.set_label('Count rate / e$^-$ s$^{-1}$')
             ax.set_xlabel('x / pixel')
-            if j == 0:
+            if j_ == 0:
                 ax.set_ylabel('Difference\ny / pixel')
             else:
                 ax.set_ylabel('y / pixel')
-
     plt.tight_layout()
     plt.savefig('{}/galaxy_{}.pdf'.format(directory, counter))
     plt.close()
@@ -297,7 +305,7 @@ def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
         sn_model = sncosmo.Model('s11-2006fo')
         if setflag:
             sn_model.set(t0=t0, z=z)
-    elif sn_type == 'IIL' or sn_type == 'IIP':
+    elif sn_type == 'IIL' or sn_type == 'IIP' or sn_type == 'II':
         sn_model = sncosmo.Model('s11-2004hx')
         if setflag:
             sn_model.set(t0=t0, z=z)
@@ -469,6 +477,8 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
             image = mog_add_psf(image, [rand_ra / pixel_scale, rand_dec / pixel_scale, m_ia],
                                 filt_zp[j], psf_comp[j])
             countsn, snf = np.sum(image) - countgal, 10**(-1/2.5 * (m_ia - filt_zp[j]))
+            q = np.where(image < 0)
+            image[q] = 1e-5
             image = add_background(image, zod_count)
             image = set_exptime(image, exptime)
             image = add_poisson(image)
@@ -495,7 +505,6 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
             flux_array.append(diff_sum)
             fluxerr_array.append(diff_sum_err)
             zp_array.append(filt_zp[j])  # filter-specific zeropoint
-            # TODO: swap to STmag from the AB system
             zpsys_array.append('ab')
 
             true_flux.append(10**(-1/2.5 * (m_ia - filt_zp[j])))
@@ -533,7 +542,7 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
             bounds.update({'x1': (-2.75, 3.55), 'c': (-0.39, 0.31)})
         result = None
         fitted_model = None
-        for z_init in np.linspace(0, np.amin(z_uppers), 5):
+        for z_init in np.linspace(0, np.amin(z_uppers), 20):
             sn_model.set(z=z_init)
             result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
                                                             bounds=bounds, minsnr=minsnr,
@@ -548,8 +557,8 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         figtext = [figtext[0], figtext[1] + '\n' + r'$\chi^2_{{\nu={}}}$ = {:.3f}'.format(result.ndof, result.chisq/result.ndof)]
 
         fig = sncosmo.plot_lc(lc_data, model=fitted_model, errors=result.errors, xfigsize=15*ncol,
-                              tighten_ylim=True, ncol=ncol, figtext=figtext)
-        fig.tight_layout()
+                              tighten_ylim=True, ncol=ncol, figtext=figtext, figtextsize=2)
+        fig.tight_layout(rect=[0, 0.03, 1, 0.935])
         fig.savefig('{}/fit_{}_{}.pdf'.format(directory, counter, sn_type))
 
         return result
@@ -581,21 +590,26 @@ if __name__ == '__main__':
 
     # TODO: vary exptime to explore the effects of exposure cadence on observation
     exptime = 1000  # seconds
-    sn_type = 'Ia'
+    sn_types = ['Ia', 'Ib', 'Ic', 'II']
 
-    t_low, t_high, t_interval = -10, 30, 5
+    t_low, t_high, t_interval = -10, 35, 15
     times = np.arange(t_low, t_high+1e-10, t_interval)
     psf_comp_filename = 'psf_comp.npy'
 
-    # psf_names = ['../../pandeia_data-1.0/wfirst/wfirstimager/psfs/wfirstimager_any_{}.fits'.format(num) for num in [0.8421, 1.0697, 1.4464, 1.2476, 1.5536, 1.9068]]
-    psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
-    oversampling, noise_removal, N_comp, cut = 4, 0, 7, 0.01
-    psf_comp_filename = 'psf_comp.npy'
-    # pmf.psf_mog_fitting(psf_names, oversampling, noise_removal, psf_comp_filename, cut, N_comp)
+    # #### WFC3 PSFs ####
+    # psf_comp_filename = '../PSFs/wfc3_psf_comp.npy'
+    # filters = ['F160W']  # ['F105W', 'F125W', 'F160W']
+    # filt_zp = [25.95]  # [27.69, 28.02, 28.19] - st; [26.27, 26.23, 25.95] - ab
+    # pixel_scale = 0.13
+    # psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
 
-    filters = ['F160W']  # ['F105W', 'F125W', 'F160W']
-    filt_zp = [25.95]  # [27.69, 28.02, 28.19] - st; [26.27, 26.23, 25.95] - ab
-    pixel_scale = 0.13
+    psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
+    psf_names = ['../PSFs/{}.fits'.format(q) for q in filters]
+
+    oversampling, noise_removal, N_comp, cut = 4, 0, 10, 0.01
+    pmf.psf_mog_fitting(psf_names, oversampling, noise_removal, psf_comp_filename, cut, N_comp,
+                        'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst')
+    # sys.exit()
 
     f = pyfits.open('../err_rdrk_wfi.fits')
     # dark current is in counts/s, so requires correcting by the exosure time
@@ -614,11 +628,29 @@ if __name__ == '__main__':
     true_params = np.empty((ngals, 5), float)
     fit_params = np.empty((ngals, 5, 2), float)
 
+    # flag for whether we should print a representative reference/science/difference image, or
+    # all of the frames - useful for avoiding huge figures
+    random_flag = 1
+
+    # priors on supernovae types: very roughly, these are the relative fractions of each type in
+    # the universe, to set the relative likelihoods of the observations with no information; these
+    # should follow sn_types as [Ia, Ib, Ic, II]. Boissier & prantzos 2009 quote, roughly and
+    # drawn by eye: Ibc/II ~ 0.3, Ic/Ib ~ 1.25, Ia/CC ~ 0.25. Hakobyan 2014, table 8, give:
+    NiaNcc, NibcNii, NicNib = 0.44, 0.36, 2.12
+    # given a/b=x we get a = x/(1+x) and b = 1/(1+x) = 1 - x/(1+x), so we can convert these to
+    # relative fractions:
+    fia, fcc = NiaNcc / (1 + NiaNcc), 1 - NiaNcc / (1 + NiaNcc)
+    fibc, fii = fcc * NibcNii / (1 + NibcNii), fcc * (1 - NibcNii / (1 + NibcNii))
+    fib, fic = fibc * (1 - NicNib / (1 + NicNib)), fibc * NicNib / (1 + NicNib)
+    sn_prior = [fia, fib, fic, fii]
+
     i = 0
     while i < ngals:
         start = timeit.default_timer()
+        # TODO: remove just Ia from fitting and randomly draw -- with relative fractions given
+        # by the priors on each SN type
         images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux = \
-            make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp_filename,
+            make_images(filters, pixel_scale, sn_types[0], times, exptime, filt_zp, psf_comp_filename,
                         dark_img, flat_img, readnoise, t0)
         print("Make: {:.2f}s".format(timeit.default_timer()-start))
         lc_data_table = Table(data=lc_data,
@@ -631,9 +663,9 @@ if __name__ == '__main__':
         figtext_split = figtext.split('x1')
         figtext = [figtext_split[0], 'x1' + figtext_split[1]]
         # TODO: expand to include all types of Sne
-        result = fit_lc(lc_data_table, [sn_type], directory, filters, i+1, figtext, ncol, minsnr)
+        result = fit_lc(lc_data_table, [sn_types[0]], directory, filters, i+1, figtext, ncol, minsnr)
         make_figures(filters, images_with_sn, images_without_sn, diff_images, exptime,
-                     directory, i+1, times)
+                     directory, i+1, times, random_flag)
 
         gs = gridcreate('09', 1, 1, 0.8, 15)
         ax = plt.subplot(gs[0])
