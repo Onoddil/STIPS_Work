@@ -14,7 +14,7 @@ from astropy.table import Table
 import sncosmo
 import astropy.units as u
 import timeit
-from scipy.optimize import fmin_l_bfgs_b
+from scipy.optimize import minimize
 
 import psf_mog_fitting as pmf
 
@@ -29,10 +29,10 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     return gs
 
 
-def model_number(run_minutes, run_n, run_obs, n_runs):
-    n = 7  # including R, eventually
-    t = 50
+def model_number(run_minutes, n_runs):
+    # assuming a static time for each run; dominated by fit, not creation currently
     n_filt_choice = 0
+    n = 7  # including R, eventually
     for k in np.arange(2, n+1):
         n_filt_choice += np.math.factorial(n) / np.math.factorial(k) / np.math.factorial(n - k)
     # cadence can vary from, say, 5 days to 25 days (5 days being the minimum needed, and 25 days
@@ -40,20 +40,12 @@ def model_number(run_minutes, run_n, run_obs, n_runs):
     cadence_interval = 5
     cadences = np.arange(5, 25+1e-10, cadence_interval)
     n_cadence = len(cadences)
-    # assuming 50 day lightcurve, observations per filter per lightcurve used as scaling for
-    # run_obs to scale run_minutes (as with k and run_n scaling similarly)
-    time = 0
-    # finally, scale by n_runs for each cadence/filter combination
-    for c in cadences:
-        for k in np.arange(2, n+1):
-            # we always have to make filt reference images, but obs sn+galaxy images, so we really
-            # have 1+obs creation runs
-            time += np.math.factorial(n) / (np.math.factorial(k) * np.math.factorial(n - k)) * (
-                (1+k) / (1+run_n)) * run_minutes * (t / c / run_obs) * n_runs
 
     n_tot = n_filt_choice * n_cadence
 
-    print("{} choices, {:.0f}/{:.0f}/{:.0f} approximate minutes/hours/days".format(n_tot, time, time/60, time/60/24))
+    time = n_tot * run_minutes * n_runs
+
+    print("{} choices, {} runs, {:.0f}/{:.0f}/{:.0f} approximate minutes/hours/days".format(n_tot, n_runs, time, time/60, time/60/24))
 
 
 def gaussian_2d(x, x_t, mu, mu_t, sigma):
@@ -394,8 +386,10 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
         t = np.radians(pa_disk)
         a = offset_r
         b = e_disk * offset_r
-        if ((((x - p) * np.cos(t) - (y - q) * np.sin(t)) / b)**2 +
-                (((x - p) * np.sin(t) + (y - q) * np.cos(t)) / a)**2 <= 1):
+        if (((((x - p) * np.cos(t) - (y - q) * np.sin(t)) / b)**2 +
+             (((x - p) * np.sin(t) + (y - q) * np.cos(t)) / a)**2 <= 1) and
+            ((((x - p) * np.cos(t) - (y - q) * np.sin(t)) / b)**2 +
+             (((x - p) * np.sin(t) + (y - q) * np.cos(t)) / a)**2 > 0.1)):
             endflag = 1
 
     sn_model = get_sn_model(sn_type, 1, t0=t0, z=z)
@@ -522,6 +516,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
 
     lc_data = [np.array(time_array), np.array(band_array), np.array(flux_array),
                np.array(fluxerr_array), np.array(zp_array), np.array(zpsys_array)]
+    true_flux = np.array(true_flux)
 
     param_names = ['z', 't0']
     if sn_type == 'Ia':
@@ -538,10 +533,11 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
     bestfit_models = []
     bestfit_results = []
     fit_time = 0
-
+    largest_z = 2.5
+    dz = 0.01
+    z_array = np.arange(0, largest_z+1e-10, dz)
+    min_counts = 0.0001
     for i, sn_type in enumerate(sn_types):
-        if sn_type == 'Ia':
-            continue
         start = timeit.default_timer()
         params = ['z', 't0']
         if sn_type == 'Ia':
@@ -551,47 +547,54 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         sn_model = get_sn_model(sn_type, 0)
         # place upper limits on the redshift probeable, by finding the z at which each filter drops
         # out of being in overlap with the model
-        z_uppers = np.empty(len(filters), float)
+        z_upper_band = np.empty(len(filters), float)
         for p in range(0, len(filters)):
             z = 0
             while sn_model.bandoverlap(filters[p], z=z):
-                z += 0.01
-            z_uppers[p] = min(2.5, z - 0.01)
-        z_lowers = np.empty(len(filters), float)
+                z += dz
+                if z > largest_z:
+                    break  # otherwise this will just keep going forever for very red filters
+            z_upper_band[p] = min(largest_z, z - dz)
+        z_upper_count = np.empty(len(filters), float)
+        z_lower_count = np.empty(len(filters), float)
         # the lower limits on z -- for this model -- are, assuming a minsnr detection in that
         # filter, a model flux in the given system of, say, 0.001 counts/s; a very low goal, but
         # one that avoids bluer SNe being selected when they would drop out of the detection. Also
-        # avoids models from failing to calculate an amplitude...
+        # avoids models from failing to calculate an amplitude... Similarly, we can calculate the
+        # maximum redshift for a blue filter to have a "detection".
         for p in range(0, len(filters)):
-            z = 0
-            # TODO: something with this. I think the minimum redshift is dictated by filters of
-            # 'good' detections having to have a minimum countrate; could add to maximum for blue
-            # filters too really...
-            while sn_model.bandflux(filters[p], t0=0, zp=filt_zp[p], zpsys='ab')
+            countrate = np.empty_like(z_array)
+            for q, z_init in enumerate(z_array):
+                sn_model.set(z=z_init)
+                countrate[q] = sn_model.bandflux(filters[p], time=0, zp=filt_zp[p], zpsys='ab')
+            z_upper_count[p] = z_array[np.where(countrate > min_counts)[0][-1]]
+            z_lower_count[p] = z_array[np.where(countrate > min_counts)[0][0]]
         # set the bounds on z to be at most the smallest of those available by the given filters in
         # the set being fit here
-        z_max = np.amin(z_uppers)
-        bounds = {'z': (0.0001, z_max)}
+        z_min = np.amax(z_lower_count)
+        z_max = min(np.amin(z_upper_band), np.amin(z_upper_count))
+        bounds = {'z': (z_min, z_max)}
         # x1 and c bounded by 3.5-sigma regions (x1: mu=0.4, sigma=0.9, c: mu=-0.04, sigma = 0.1)
         if sn_type == 'Ia':
             bounds.update({'x1': (-2.75, 3.55), 'c': (-0.39, 0.31)})
         result = None
         fitted_model = None
-        for z_init in np.linspace(0.01, z_min, 20):
+        for z_init in np.linspace(z_min, z_max, 50):
             sn_model.set(z=z_init)
-            if sn_type == 'Ia':
-                sn_model.set(x0=1e-5)
-            else:
-                sn_model.set(amplitude=1e-15)
-            result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
-                                                            bounds=bounds, minsnr=minsnr,
-                                                            guess_z=False)
+            # result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
+            #                                                 bounds=bounds, minsnr=minsnr,
+            #                                                 guess_z=False)
             if result is None or result_temp.chisq < result.chisq:
                 result = result_temp
                 fitted_model = fitted_model_temp
+        # result, fitted_model = sncosmo.mcmc_lc(lc_data, sn_model, params, bounds=bounds,
+        #                                        minsnr=minsnr)
         bestfit_models.append(fitted_model)
         bestfit_results.append(result)
-        x2s[i] = result.chisq
+        try:
+            x2s[i] = result.chisq
+        except AttributeError:
+            x2s[i] = sncosmo.chisq(lc_data, fitted_model)
         fit_time += timeit.default_timer()-start
 
     print('Fit: {:.2f}s'.format(fit_time))
@@ -600,9 +603,10 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
     best_ind = np.argmax(probs)
     best_r = bestfit_results[best_ind]
     best_m = bestfit_models[best_ind]
+    best_x2 = x2s[best_ind]
 
     figtext = [figtext[0], figtext[1] + '\n' + r'$\chi^2_{{\nu={}}}$ = {:.3f}'.format(best_r.ndof,
-               best_r.chisq/best_r.ndof)]
+               best_x2/best_r.ndof)]
     errors = best_r.errors
     model_params = best_m.parameters
     if sn_types[best_ind] == 'Ia':
@@ -647,8 +651,8 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
 
 
 if __name__ == '__main__':
-    # run_mins, run_n, run_obs, n_runs = 10/60, 6, 5, 100
-    # model_number(run_mins, run_n, run_obs, n_runs)
+    # run_mins, n_runs = 30/60, 100
+    # model_number(run_mins, n_runs)
 
     # sys.exit()
 
@@ -733,8 +737,8 @@ if __name__ == '__main__':
 
     # z, t0, x0, x1, c, A[mplitude], maintaining the ability to track Ia/CC, depending on which are
     # randomly drawn
-    true_params = np.zeros((ngals, 6), float)
-    fit_params = np.zeros((ngals, 6, 2), float)
+    true_params = np.ones((ngals, 6), float) * -999
+    fit_params = np.ones((ngals, 6, 2), float) * -999
 
     i = 0
     colours = ['k', 'r', 'b', 'g', 'c', 'm', 'orange']
@@ -744,7 +748,7 @@ if __name__ == '__main__':
 
     while i < ngals:
         type_ind = np.random.choice(len(sn_types))
-        print('==== {} ===='.format(sn_types[type_ind]))
+        print('==== {} == {} ===='.format(i+1, sn_types[type_ind]))
         start = timeit.default_timer()
         images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux = \
             make_images(filters, pixel_scale, sn_types[type_ind], times, exptime, filt_zp,
@@ -768,7 +772,7 @@ if __name__ == '__main__':
             A_sig = int(np.floor(np.log10(abs(A_))))
             figtext.append('Type {}: $z = {:.3f}$\n$t_0 = {:.1f}$'.format(
                            sn_types[type_ind], z_, t_))
-            figtext.append('$A = {:.3f} \\times 10^{}$'.format(A_/10**A_sig, A_sig))
+            figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
 
         result, prob = fit_lc(lc_data_table, sn_types, directory, filters, i+1, figtext, ncol,
                               minsnr, sn_priors, filt_zp)
@@ -788,13 +792,14 @@ if __name__ == '__main__':
         plt.tight_layout()
         plt.savefig('{}/flux_ratio_{}.pdf'.format(directory, i+1))
 
-        # TODO: I think this doesn't make any sense; fix this if it doesn't make any sense
         if sn_types[type_ind] == 'Ia':
             true_params[i, :-1] = sn_params
+        else:
+            true_params[i, [0, 1, -1]] = sn_params
+        if 'x0' in result.param_names:
             fit_params[i, :-1, 0] = result.parameters
             fit_params[i, :-1, 1] = [result.errors[q] for q in ['z', 't0', 'x0', 'x1', 'c']]
         else:
-            true_params[i, [0, 1, -1]] = sn_params
             fit_params[i, [0, 1, -1], 0] = result.parameters
             fit_params[i, [0, 1, -1], 1] = [result.errors[q] for q in ['z', 't0', 'amplitude']]
 
@@ -810,10 +815,16 @@ if __name__ == '__main__':
     gs_ = gridcreate('asjhfs', 2, 3, 0.8, 15)
     axs = [plt.subplot(gs_[i]) for i in range(0, 6)]
     for i, (ax, name) in enumerate(zip(axs, ['z', 't0', 'x0', 'x1', 'c', 'A'])):
-        ax.errorbar(np.arange(1, ngals+1), fit_params[:, i, 0] - true_params[:, i],
-                    yerr=fit_params[:, i, 1], fmt='k.')
+        q = (fit_params[:, i, 0] > -999) & (true_params[:, i] > -999)
+        ax.errorbar(np.arange(1, ngals+1)[q], fit_params[q, i, 0] - true_params[q, i],
+                    yerr=fit_params[q, i, 1], fmt='k.')
         ax.axhline(0, c='k', ls='--')
         ax.set_xlabel('Count')
         ax.set_ylabel('{} difference (fit - true)'.format(name))
     plt.tight_layout()
     plt.savefig('{}/derived_parameter_ratio.pdf'.format(directory))
+
+    # TODO LIST:
+    # 1) check k-corrections for SNANA lightcurves and get the best near/mid-IR lightcurves
+    # 2) find physical bounds for lightcurve fitting to avoid unphysical model outputs
+    # 3) anti-dither shift observations to remove most of the residual subtraction pattern

@@ -75,7 +75,7 @@ for j in range(0, len(filters)):
         f = 10**(-1/2.5 * (m_ia - filt_zp[j]))
         if f < 0:
             f = 1e-5
-        flux_array.append(f)
+        flux_array.append(f + np.random.normal(0, np.sqrt(f)))
         fluxerr_array.append(np.sqrt(f))
         zp_array.append(filt_zp[j])
         zpsys_array.append('ab')
