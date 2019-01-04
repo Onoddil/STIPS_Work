@@ -193,7 +193,17 @@ def psf_fit_fun(p, x, y):
     return psf_fit
 
 
-def psf_mog_fitting(psf_names, os, noise_removal, psf_comp_filename, cut, N_comp, type):
+def eq_con(x):
+    # since sum_k c_k = 1, the equality constrain is sum_k c_k - 1
+    return np.sum([x[5+i*6] for i in range(0, int(len(x)/6))]) - 1
+
+
+def eq_con_jac(x):
+    # if f = sum_k c_k - 1, then dfdc1 = 1 for all c_k; zero otherwise
+    return np.array([0, 0, 0, 0, 0, 1]*int(len(x)/6))
+
+
+def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, cut, N_comp, type_):
     gs = gridcreate('adsq', 4, len(psf_names), 0.8, 15)
     # assuming each gaussian component has mux, muy, sigx, sigy, rho, c
     psf_comp = np.empty((len(psf_names), N_comp, 6), float)
@@ -207,7 +217,7 @@ def psf_mog_fitting(psf_names, os, noise_removal, psf_comp_filename, cut, N_comp
         # #### WFIRST ####
         psf_image = f[1].data
 
-        x, y = np.arange(0, psf_image.shape[1])/os, np.arange(0, psf_image.shape[0])/os
+        x, y = np.arange(0, psf_image.shape[1])/oversamp, np.arange(0, psf_image.shape[0])/oversamp
         x_cent, y_cent = (x[-1]+x[0])/2, (y[-1]+y[0])/2
         over_index_middle = 1 / 2
         cut_int = ((x.reshape(1, -1) % 1.0 == over_index_middle) &
@@ -273,10 +283,13 @@ def psf_mog_fitting(psf_names, os, noise_removal, psf_comp_filename, cut, N_comp
         counter = np.arange(0, N_pools*N_overloop)
         xy_step = 2
         x0 = None
-        min_kwarg = {'method': 'L-BFGS-B', 'args': (x, y, psf_image, 1),
+        method = 'SLSQP'  # 'L-BFGS-B'
+        # we must constrain sum_k c_k = 1, to ensure flux preservation in convolution
+        min_kwarg = {'method': method, 'args': (x, y, psf_image, 1),
                      'jac': True, 'bounds': [(x[0], x[-1]), (y[0], y[-1]),
                                              (1e-5, 5), (1e-5, 5), (-0.999, 0.999),
-                                             (None, None)]*N_comp}
+                                             (None, None)]*N_comp,
+                     'constraints': {'type': 'eq', 'fun': eq_con, 'jac': eq_con_jac}}
         iter_rep = itertools.repeat([x, y, psf_image, 1, x_cent, y_cent, N_comp, min_kwarg, niters,
                                      x0, xy_step, temp])
         iter_group = zip(counter, iter_rep)
@@ -315,7 +328,7 @@ def psf_mog_fitting(psf_names, os, noise_removal, psf_comp_filename, cut, N_comp
         ax.set_ylabel('y / pixel')
 
     plt.tight_layout()
-    plt.savefig('psf_fit/test_psf_mog_{}.pdf'.format(type))
+    plt.savefig('psf_fit/test_psf_mog_{}.pdf'.format(type_))
 
     np.save(psf_comp_filename, psf_comp)
 
@@ -326,7 +339,7 @@ if __name__ == '__main__':
     psfs = []
     reduced_psfs = []
     oversamp = 4
-    import os
+
     for filter_ in filters:
         psf = create_psf_image(filter_, 'psf_fit', oversamp)
         psfs.append(psf)
@@ -341,7 +354,7 @@ if __name__ == '__main__':
         norm = simple_norm(psfs[i][1].data, 'log', percent=99.9)
         img = ax.imshow(psfs[i][1].data, origin='lower', cmap='viridis', norm=norm)
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label('{} PSF Supersampled   Response'.format(filters[i]))
+        cb.set_label('{} PSF Supersampled Response'.format(filters[i]))
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
