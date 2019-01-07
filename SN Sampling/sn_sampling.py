@@ -14,7 +14,6 @@ from astropy.table import Table
 import sncosmo
 import astropy.units as u
 import timeit
-from scipy.optimize import minimize
 from scipy.ndimage import shift
 
 import psf_mog_fitting as pmf
@@ -153,7 +152,6 @@ def mog_galaxy(pixel_scale, filt_zp, psf_c, gal_params):
     # total flux in galaxy -- ensure that all units end up in flux as counts/s accordingly
     Sg = 10**(-1/2.5 * (mag - filt_zp))
     Sg = 1
-    total = 0
     for k in range(0, len(mks)):
         pk = pks[k]
         Vk = Vks[k]
@@ -173,14 +171,21 @@ def mog_galaxy(pixel_scale, filt_zp, psf_c, gal_params):
             # corresponding reverse correction so that the PSF dimensions are correct, which are
             # defined in pure pixel scale
             image += Sg * cm * pk * g_2d / (half_l_r / pixel_scale)**2
-            total += np.sum(cm * pk * g_2d / (half_l_r / pixel_scale)**2)
-            print(cm, pk, np.sum(g_2d), np.sum(cm * pk * g_2d / (half_l_r / pixel_scale)**2), total)
-    print('gal', Sg, np.sum(image), np.sum(pks))
+
+    p = psf_c.reshape(-1)
+    x, y = np.arange(-10, 10+1e-10, 0.05), np.arange(-10, 10+1e-10, 0.05)
+    psf_fit = pmf.psf_fit_fun(p, x, y)
+    over_index_middle = 0.5
+    cut_int = (((x.reshape(1, -1) + x[0]) % 1.0 > over_index_middle - 1e-3) &
+               ((x.reshape(1, -1) + x[0]) % 1.0 < over_index_middle + 1e-3) &
+               ((y.reshape(-1, 1) + y[0]) % 1.0 > over_index_middle - 1e-3) &
+               ((y.reshape(-1, 1) + y[0]) % 1.0 < over_index_middle + 1e-3))
+    psf_sum = np.sum(psf_fit[cut_int])
+    print('gal', Sg, np.sum(image), psf_sum)
     return image
 
 
 def mog_add_psf(image, psf_params, filt_zp, psf_c):
-    image = np.copy(image)
     offset_ra_pix, offset_dec_pix, mag = psf_params
     x_cent, y_cent = (image.shape[0]-1)/2, (image.shape[1]-1)/2
     xg = np.array([[(offset_ra_pix + x_cent) * pixel_scale],
@@ -209,6 +214,7 @@ def mog_add_psf(image, psf_params, filt_zp, psf_c):
 
     # total flux in source -- ensure that all units end up in flux as counts/s accordingly
     Sg = 10**(-1/2.5 * (mag - filt_zp))
+    Sg = 1
     count = np.sum(image)
     for k in range(0, len(mks)):
         pk = pks[k]
@@ -223,7 +229,11 @@ def mog_add_psf(image, psf_params, filt_zp, psf_c):
         # so need to undo the unit change to get the correct dimensions, having fit for the PSF
         # in pure pixels
         image += Sg * pk * g_2d * pixel_scale**2
-    print('SN', Sg, np.sum(image)-count)
+
+    p = psf_c.reshape(-1)
+    x, y = np.arange(-9.5, 9.5+1e-10, 1), np.arange(-9.5, 9.5+1e-10, 1)
+    psf_sum = np.sum(pmf.psf_fit_fun(p, x, y))
+    print('SN', Sg, np.sum(image)-count, psf_sum)
     return image
 
 
@@ -350,7 +360,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     # exponentials (n=1). axial ratios vary 0.5-1 for ellipticals and 0.1-1 for spirals
     rand_num = np.random.uniform()
     n_type = 4 if rand_num < 0.5 else 1
-    # randomly draw the ellipcity from 0.5/0.1 to 1, depending on sersic index
+    # randomly draw the eccentricity from 0.5/0.1 to 1, depending on sersic index
     e_disk = np.random.uniform(0.5 if n_type == 4 else 0.1, 1.0)
     # position angle can be uniformly drawn [0, 360) as we convert to radians elsewhere
     pa_disk = np.random.uniform(0, 360)
@@ -380,6 +390,8 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     t = np.radians(pa_disk)
     Rg = np.array([[-a * np.sin(t), b * np.cos(t)], [a * np.cos(t), b * np.sin(t)]])
     Vgm_unit = np.matmul(Rg, np.transpose(Rg))
+
+    offset_r = 2 * pixel_scale
 
     endflag = 0
     while endflag == 0:
@@ -443,12 +455,12 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
                            [offset_ra, offset_dec])
         q = np.where(image < 0)
         image[q] = 1e-8
-        image = add_background(image, zod_count)
+        # image = add_background(image, zod_count)
         image = set_exptime(image, exptime)
-        image = add_poisson(image)
-        image = mult_flat(image, flat_img)
-        image = add_dark(image, dark_img)
-        image = add_read(image, readnoise)
+        # image = add_poisson(image)
+        # image = mult_flat(image, flat_img)
+        # image = add_dark(image, dark_img)
+        # image = add_read(image, readnoise)
 
         # second_gal_offset is the pixel offset, relative to the central pixel, of the observation,
         # onto which we should shift the 'reference' frame. we therefore are asking given
@@ -499,12 +511,12 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
                                 filt_zp[j], psf_comp[j])
             q = np.where(image < 0)
             image[q] = 1e-8
-            image = add_background(image, zod_count)
+            # image = add_background(image, zod_count)
             image = set_exptime(image, exptime)
-            image = add_poisson(image)
-            image = mult_flat(image, flat_img)
-            image = add_dark(image, dark_img)
-            image = add_read(image, readnoise)
+            # image = add_poisson(image)
+            # image = mult_flat(image, flat_img)
+            # image = add_dark(image, dark_img)
+            # image = add_read(image, readnoise)
 
             images.append(image)
             image_diff = image - image_shifted
@@ -635,7 +647,7 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         x1_format = sncosmo.utils.format_value(model_params[3], errors.get('x1'), latex=True)
         c_format = sncosmo.utils.format_value(model_params[4], errors.get('c'), latex=True)
         figtext.append('Type {}: $z = {}$\n$t_0 = {}$\n$x_0 = {}$'.format(sn_types[best_ind],
-                        z_format, t0_format, x0_format))
+                       z_format, t0_format, x0_format))
         if probs[0] > 0:
             p_sig = int(np.floor(np.log10(abs(probs[0]))))
         else:
@@ -645,13 +657,13 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
                            x1_format, c_format, probs[0]/10**p_sig, p_sig))
         else:
             figtext.append('$x_1 = {}$\n$c = {}$\n$P(Ia|D) = {:.3f}$'.format(x1_format, c_format,
-                        probs[0]))
+                           probs[0]))
     else:
         z_format = sncosmo.utils.format_value(model_params[0], errors.get('z'), latex=True)
         t0_format = sncosmo.utils.format_value(model_params[1], errors.get('t0'), latex=True)
         A_format = sncosmo.utils.format_value(model_params[2], errors.get('amplitude'), latex=True)
         figtext.append('Type {}: $z = {}$\n$t_0 = {}$'.format(sn_types[best_ind],
-                        z_format, t0_format))
+                       z_format, t0_format))
         if probs[0] > 0:
             p_sig = int(np.floor(np.log10(abs(probs[0]))))
         else:
@@ -718,13 +730,13 @@ if __name__ == '__main__':
     # pixel_scale = 0.13
     # psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
 
-    psf_comp_filename = '../PSFs/wfirst_psf_comp_test.npy'
+    psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
     psf_names = ['../PSFs/{}.fits'.format(q) for q in filters]
 
-    oversampling, noise_removal, N_comp, cut = 4, 0, 15, 0.01
+    oversampling, noise_removal, N_comp, cut, max_pix_offset = 4, 0, 15, 0.015, 5
     pmf.psf_mog_fitting(psf_names, oversampling, noise_removal, psf_comp_filename, cut, N_comp,
-                        'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst')
-    # sys.exit()
+                        'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst', max_pix_offset)
+    sys.exit()
 
     f = pyfits.open('../err_rdrk_wfi.fits')
     # dark current is in counts/s, so requires correcting by the exosure time
@@ -795,7 +807,7 @@ if __name__ == '__main__':
 
         make_figures(filters, images_with_sn, images_without_sn, diff_images, exptime,
                      directory, i+1, times, random_flag)
-
+        sys.exit()
         result, prob = fit_lc(lc_data_table, sn_types, directory, filters, i+1, figtext, ncol,
                               minsnr, sn_priors, filt_zp)
 

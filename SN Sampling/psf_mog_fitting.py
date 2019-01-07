@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import astropy.io.fits as pyfits
 from astropy.visualization import simple_norm
 from webbpsf import wfirst
+import copy
 
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
@@ -22,33 +23,34 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
 
 def create_psf_image(filter, directory, oversamp):
     # see https://webbpsf.readthedocs.io/en/stable/wfirst.html for details of detector things
-    pixelscale = 110e-3
-    wfi = wfirst.WFI(pixelscale=pixelscale/oversamp)
+    wfi = wfirst.WFI()
     wfi.filter = filter
     wfi.detector = 'SCA09'
     # position can vary 4 - 4092, allowing for a 4 pixel gap
     wfi.detector_position = (2048, 2048)
     wfi.options['parity'] = 'odd'
-    psf = wfi.calc_psf()
+    wfi.options['output_mode'] = 'both'
+
+    psf = wfi.calc_psf(oversample=oversamp)
 
     return psf
 
 
-def create_effective_psf(psf, oversamp):
+def create_effective_psf(psf_, oversamp):
     # you lose oversamp/2 pixels at each edge, so overall lose oversamp pixels
     N = int(oversamp/2)
-    reduced_psf = np.empty((psf[1].data.shape[0]-2*N, psf[1].data.shape[1]-2*N), float)
-    psf = np.copy(psf)
-    for i in range(N, psf[1].data.shape[0]-N):
-        for j in range(N, psf[1].data.shape[1]-N):
+    psf = copy.deepcopy(psf_)
+    reduced_psf = np.empty((psf[0].data.shape[0]-2*N, psf[0].data.shape[1]-2*N), float)
+    for i in range(N, psf[0].data.shape[0]-N):
+        for j in range(N, psf[0].data.shape[1]-N):
             # because the "middle" of an NxN pixel grid is two lower but only one higher than the
             # specific pixel (i.e., p0 p1 [p2 is this pixel] p3), we only go +-N with python's
             # 'drop the last value' slicing; otherwise we'd sum 2N+1 data points for each
             # oversample, creating additional flux
-            reduced_psf[i-N, j-N] = np.sum(psf[1].data[i-N:i+N, j-N:j+N])
-    psf[1].data = reduced_psf
-    psf[1].header['NAXIS1'] = reduced_psf.shape[0]
-    psf[1].header['NAXIS2'] = reduced_psf.shape[1]
+            reduced_psf[i-N, j-N] = np.sum(psf[0].data[i-N:i+N, j-N:j+N])
+    psf[0].data = reduced_psf
+    psf[0].header['NAXIS1'] = reduced_psf.shape[0]
+    psf[0].header['NAXIS2'] = reduced_psf.shape[1]
     psf[0].header['HISTORY'] = "Created oversampled ePSF response at original pixel resolution"
     return psf
 
@@ -203,7 +205,8 @@ def eq_con_jac(x):
     return np.array([0, 0, 0, 0, 0, 1]*int(len(x)/6))
 
 
-def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, cut, N_comp, type_):
+def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, cut, N_comp, type_,
+                    max_pix_offset):
     gs = gridcreate('adsq', 4, len(psf_names), 0.8, 15)
     # assuming each gaussian component has mux, muy, sigx, sigy, rho, c
     psf_comp = np.empty((len(psf_names), N_comp, 6), float)
@@ -215,7 +218,7 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, cut, 
         # them as (N, y, x) with the transposition from f- to c-order, thus the psf is (y, x) shape
         # psf_image = f[0].data[4, :, :]
         # #### WFIRST ####
-        psf_image = f[1].data
+        psf_image = f[0].data
 
         x, y = np.arange(0, psf_image.shape[1])/oversamp, np.arange(0, psf_image.shape[0])/oversamp
         x_cent, y_cent = (x[-1]+x[0])/2, (y[-1]+y[0])/2
@@ -229,7 +232,8 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, cut, 
         y -= y_cent
         x_cent, y_cent = 0, 0
 
-        y_w, x_w = np.where(psf_image >= cut * np.amax(psf_image))
+        x_w = np.where((x >= -1 * max_pix_offset) & (x <= max_pix_offset))[0]
+        y_w = np.where((y >= -1 * max_pix_offset) & (y <= max_pix_offset))[0]
         y_w0, y_w1, x_w0, x_w1 = np.amin(y_w), np.amax(y_w), np.amin(x_w), np.amax(x_w)
 
         x_, y_ = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
@@ -254,8 +258,7 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, cut, 
 
         psf_image = psf_image[y_w0:y_w1+1, x_w0:x_w1+1]
         # remove any edge features with a blanket zeroing of 'noise'
-        if noise_removal:
-            psf_image[psf_image < cut * np.amax(psf_image)] = 0
+        psf_image[psf_image < cut * np.amax(psf_image)] = 0
         x, y = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
 
         ax = plt.subplot(gs[0, j])
@@ -340,6 +343,10 @@ if __name__ == '__main__':
     reduced_psfs = []
     oversamp = 4
 
+    # with output_model set to 'both' HDUList [0] is the oversampled data and [1] is the
+    # detector-binned data -- i.e., the created ePSF but sampled at pixel centers, which is thus
+    # propagated into reduced_psf with [1] unchaged but [0] now the ePSF (the detector-pixel
+    # sampled fraction at oversampling levels of pixel positions).
     for filter_ in filters:
         psf = create_psf_image(filter_, 'psf_fit', oversamp)
         psfs.append(psf)
@@ -348,26 +355,35 @@ if __name__ == '__main__':
         rp_hdulist.writeto('../PSFs/{}.fits'.format(filter_), overwrite=True)
         reduced_psfs.append(reduced_psf)
 
-    gs = gridcreate('a', 2, len(filters), 0.8, 15)
+    gs = gridcreate('a', 3, len(filters), 0.8, 15)
     for i in range(0, len(filters)):
         ax = plt.subplot(gs[0, i])
-        norm = simple_norm(psfs[i][1].data, 'log', percent=99.9)
+        norm = simple_norm(psfs[i][1].data, 'log', percent=100)
         img = ax.imshow(psfs[i][1].data, origin='lower', cmap='viridis', norm=norm)
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('{} PSF Detector Response'.format(filters[i]))
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+
+        ax = plt.subplot(gs[1, i])
+        norm = simple_norm(psfs[i][0].data, 'log', percent=100)
+        img = ax.imshow(psfs[i][0].data, origin='lower', cmap='viridis', norm=norm)
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('{} PSF Supersampled Response'.format(filters[i]))
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
-        x, y = np.arange(0, reduced_psfs[i][1].data.shape[1])/oversamp, \
-            np.arange(0, reduced_psfs[i][1].data.shape[0])/oversamp
+        x, y = np.arange(0, reduced_psfs[i][0].data.shape[1])/oversamp, \
+            np.arange(0, reduced_psfs[i][0].data.shape[0])/oversamp
         over_index_middle = 1 / 2
         cut_int = ((x.reshape(1, -1) % 1.0 == over_index_middle) &
                    (y.reshape(-1, 1) % 1.0 == over_index_middle))
         print(filters[i], np.sum(psfs[i][1].data), np.amax(psfs[i][1].data),
-              np.sum(reduced_psfs[i][1].data[cut_int]), np.amax(reduced_psfs[i][1].data))
-        ax = plt.subplot(gs[1, i])
-        norm = simple_norm(reduced_psfs[i][1].data, 'log', percent=99.9)
-        img = ax.imshow(reduced_psfs[i][1].data, origin='lower', cmap='viridis', norm=norm)
+              np.sum(psfs[i][0].data), np.amax(psfs[i][0].data),
+              np.sum(reduced_psfs[i][0].data[cut_int]), np.amax(reduced_psfs[i][0].data))
+        ax = plt.subplot(gs[2, i])
+        norm = simple_norm(reduced_psfs[i][0].data, 'log', percent=100)
+        img = ax.imshow(reduced_psfs[i][0].data, origin='lower', cmap='viridis', norm=norm)
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('{} PSF Response'.format(filters[i]))
         ax.set_xlabel('x / pixel')
