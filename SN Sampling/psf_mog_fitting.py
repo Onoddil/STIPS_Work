@@ -21,10 +21,10 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     return gs
 
 
-def create_psf_image(filter, directory, oversamp):
+def create_psf_image(filter_, directory, oversamp):
     # see https://webbpsf.readthedocs.io/en/stable/wfirst.html for details of detector things
     wfi = wfirst.WFI()
-    wfi.filter = filter
+    wfi.filter = filter_
     wfi.detector = 'SCA09'
     # position can vary 4 - 4092, allowing for a 4 pixel gap
     wfi.detector_position = (2048, 2048)
@@ -41,6 +41,8 @@ def create_effective_psf(psf_, oversamp):
     N = int(oversamp/2)
     psf = copy.deepcopy(psf_)
     reduced_psf = np.empty((psf[0].data.shape[0]-2*N, psf[0].data.shape[1]-2*N), float)
+    print(psf[0].data.shape, reduced_psf.shape)
+    sys.exit()
     for i in range(N, psf[0].data.shape[0]-N):
         for j in range(N, psf[0].data.shape[1]-N):
             # because the "middle" of an NxN pixel grid is two lower but only one higher than the
@@ -218,7 +220,7 @@ def background_mog_fit(p, x, y):
     return (f - 1)**2, np.array([2 * (f - 1) * dfdc])
 
 
-def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, cut, N_comp, type_,
+def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, N_comp, type_,
                     max_pix_offset):
     gs = gridcreate('adsq', 5, len(psf_names), 0.8, 5)
     # assuming each gaussian component has mux, muy, sigx, sigy, rho, c
@@ -232,15 +234,14 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, cut, 
         # psf_image = f[0].data[4, :, :]
         # #### WFIRST ####
         psf_image = f[0].data
-
+        print(psf_image.shape)
         x, y = np.arange(0, psf_image.shape[1])/oversamp, np.arange(0, psf_image.shape[0])/oversamp
         x_cent, y_cent = (x[-1]+x[0])/2, (y[-1]+y[0])/2
+        print(x_cent, y_cent, x[-1], y[-1])
         over_index_middle = 1 / 2
         cut_int = ((x.reshape(1, -1) % 1.0 == over_index_middle) &
                    (y.reshape(-1, 1) % 1.0 == over_index_middle))
-        # just ignore anything below cut*np.amax(image) to only fit central psf
-        total_flux, cut_flux = np.sum(psf_image[cut_int]), \
-            np.sum(psf_image[cut_int & (psf_image >= cut * np.amax(psf_image))])
+        total_flux = np.sum(psf_image[cut_int])
         x -= x_cent
         y -= y_cent
         x_cent, y_cent = 0, 0
@@ -249,7 +250,14 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, cut, 
         y_w = np.where((y >= -1 * max_pix_offset) & (y <= max_pix_offset))[0]
         y_w0, y_w1, x_w0, x_w1 = np.amin(y_w), np.amax(y_w), np.amin(x_w), np.amax(x_w)
 
-        x_, y_ = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
+        psf_image_c = np.copy(psf_image[y_w0:y_w1+1, x_w0:x_w1+1])
+        x_c, y_c = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
+        cut_int = ((x_c.reshape(1, -1) % 1.0 == over_index_middle) &
+                   (y_c.reshape(-1, 1) % 1.0 == over_index_middle))
+        cut_flux = np.sum(psf_image_c[cut_int])
+        print(cut_flux, total_flux, np.sum(psf_image_c), x_c, y_c, x, y)
+        print('issue is webbpsf not making sensible shaped PSF arrays; need 1 + 4*N as final shape to get reasonable zero-centered dx/dy...')
+        sys.exit()
         ax = plt.subplot(gs[4, j])
         psf_ratio = np.log10((np.abs(psf_image) / np.amax(psf_image)) + 1e-8)
         norm = simple_norm(psf_ratio, 'linear', percent=100)
@@ -264,15 +272,10 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, cut, 
         cb.set_label('Log Absolute Relative PSF Response')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
-        ax.axvline(x_[0], c='k', ls='-')
-        ax.axvline(x_[-1], c='k', ls='-')
-        ax.axhline(y_[0], c='k', ls='-')
-        ax.axhline(y_[-1], c='k', ls='-')
-
-        psf_image_c = np.copy(psf_image[y_w0:y_w1+1, x_w0:x_w1+1])
-        # remove any edge features with a blanket zeroing of 'noise'
-        psf_image_c[psf_image_c < cut * np.amax(psf_image_c)] = 0
-        x_c, y_c = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
+        ax.axvline(x_c[0], c='k', ls='-')
+        ax.axvline(x_c[-1], c='k', ls='-')
+        ax.axhline(y_c[0], c='k', ls='-')
+        ax.axhline(y_c[-1], c='k', ls='-')
 
         ax = plt.subplot(gs[0, j])
         ax.set_title(r'Cut flux is {:.3f}\% of total flux'.format(cut_flux/total_flux*100))
