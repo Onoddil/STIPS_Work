@@ -734,7 +734,7 @@ if __name__ == '__main__':
     psf_names = ['../PSFs/{}.fits'.format(q) for q in filters]
 
     oversampling, noise_removal, N_comp, cut, max_pix_offset = 4, 0, 15, 0.015, 5
-    pmf.psf_mog_fitting(psf_names, oversampling, noise_removal, psf_comp_filename, cut, N_comp,
+    pmf.psf_mog_fitting([psf_names[0]], oversampling, noise_removal, psf_comp_filename, cut, N_comp,
                         'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst', max_pix_offset)
     sys.exit()
 

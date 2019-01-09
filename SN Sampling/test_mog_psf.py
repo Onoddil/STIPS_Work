@@ -58,7 +58,7 @@ for j in range(0, len(psf_names)):
 
     y_w0, y_w1, x_w0, x_w1 = np.amin(y_w), np.amax(y_w), np.amin(x_w), np.amax(x_w)
     x_, y_ = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
-    ax = plt.subplot(gs[3, j])
+    ax = plt.subplot(gs[4, j])
     psf_ratio = np.log10((np.abs(psf_image) / np.amax(psf_image)) + 1e-8)
     norm = simple_norm(psf_ratio, 'linear', percent=100)
     # with the psf being (y, x) we do not need to transpose it to correct for pcolormesh being
@@ -137,7 +137,7 @@ for j in range(0, len(psf_names)):
                ((y_.reshape(-1, 1) + y_[0]) % 1.0 > over_index_middle - 1e-3) &
                ((y_.reshape(-1, 1) + y_[0]) % 1.0 < over_index_middle + 1e-3))
     print(np.sum(psf_fit_[cut_int]))
-    ax = plt.subplot(gs[4, j])
+    ax = plt.subplot(gs[3, j])
     ratio = (psf_fit - psf_image)
     ratio_ma = np.ma.array(ratio, mask=(psf_image == 0) & (psf_image > 1e-3))
     norm = simple_norm(ratio[(ratio != 0) & (psf_image > 1e-3)], 'linear', percent=100)
