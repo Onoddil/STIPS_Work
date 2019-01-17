@@ -22,13 +22,12 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     return gs
 
 
-noise_removal = 0
 os = 4
 cut = 0.015
-max_pix_offset = 5
+max_pix_offset = 10
 filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
 psf_names = ['../PSFs/{}.fits'.format(q) for q in filters]
-gs = gridcreate('adsq', 5, len(psf_names), 0.8, 5)
+gs = gridcreate('adsq', 4, len(psf_names), 0.8, 5)
 # assuming each gaussian component has mux, muy, sigx, sigy, rho, c
 psf_comp = np.load('../PSFs/wfirst_psf_comp.npy')
 for j in range(0, len(psf_names)):
@@ -58,33 +57,13 @@ for j in range(0, len(psf_names)):
 
     y_w0, y_w1, x_w0, x_w1 = np.amin(y_w), np.amax(y_w), np.amin(x_w), np.amax(x_w)
     x_, y_ = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
-    ax = plt.subplot(gs[4, j])
-    psf_ratio = np.log10((np.abs(psf_image) / np.amax(psf_image)) + 1e-8)
-    norm = simple_norm(psf_ratio, 'linear', percent=100)
-    # with the psf being (y, x) we do not need to transpose it to correct for pcolormesh being
-    # flipped, but our x and y need additional tweaking, as these are pixel centers, but
-    # pcolormesh wants pixel edges. we thus subtract half a pixel off each value and add a
-    # final value to the end
-    dx, dy = np.mean(np.diff(x)), np.mean(np.diff(y))
-    x_pc, y_pc = np.append(x - dx/2, x[-1] + dx/2), np.append(y - dy/2, y[-1] + dy/2)
-    img = ax.pcolormesh(x_pc, y_pc, psf_ratio, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
-    cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-    cb.set_label('Log Absolute Relative PSF Response')
-    ax.set_xlabel('x / pixel')
-    ax.set_ylabel('y / pixel')
-    ax.axvline(x_[0], c='k', ls='-')
-    ax.axvline(x_[-1], c='k', ls='-')
-    ax.axhline(y_[0], c='k', ls='-')
-    ax.axhline(y_[-1], c='k', ls='-')
 
-    psf_image = psf_image[y_w0:y_w1+1, x_w0:x_w1+1]
-    # remove any edge features with a blanket zeroing of 'noise'
-    psf_image[psf_image < cut * np.amax(psf_image)] = 0
-    x, y = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
+    psf_image_c = np.copy(psf_image[y_w0:y_w1+1, x_w0:x_w1+1])
+    x_c, y_c = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
 
     ax = plt.subplot(gs[0, j])
     ax.set_title(r'Cut flux is {:.3f}\% of total flux'.format(cut_flux/total_flux*100))
-    norm = simple_norm(psf_image, 'log', percent=99.9)
+    norm = simple_norm(psf_image, 'log', percent=100)
     # with the psf being (y, x) we do not need to transpose it to correct for pcolormesh being
     # flipped, but our x and y need additional tweaking, as these are pixel centers, but
     # pcolormesh wants pixel edges. we thus subtract half a pixel off each value and add a
@@ -96,20 +75,26 @@ for j in range(0, len(psf_names)):
     cb.set_label('PSF Response')
     ax.set_xlabel('x / pixel')
     ax.set_ylabel('y / pixel')
+    ax.axvline(x_c[0], c='k', ls='-')
+    ax.axvline(x_c[-1], c='k', ls='-')
+    ax.axhline(y_c[0], c='k', ls='-')
+    ax.axhline(y_c[-1], c='k', ls='-')
 
     p = psf_comp[j].reshape(-1)
-    print(pmf.psf_fit_min(p, x, y, psf_image, 1)[0])
+    print(pmf.psf_fit_min(p, x, y, psf_image)[0])
     psf_fit = pmf.psf_fit_fun(p, x, y)
-    d = 0.25
-    x = [-2, -1, 0, 1, 2]
-    print(np.sum(pmf.psf_fit_fun(p, [q+d for q in x], [q+d for q in x])))
+
     ax = plt.subplot(gs[1, j])
-    norm = simple_norm(psf_fit, 'log', percent=99.9)
+    norm = simple_norm(psf_fit, 'log', percent=100)
     img = ax.pcolormesh(x_pc, y_pc, psf_fit, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
     cb = plt.colorbar(img, ax=ax, use_gridspec=True)
     cb.set_label('PSF Response')
     ax.set_xlabel('x / pixel')
     ax.set_ylabel('y / pixel')
+    ax.axvline(x_c[0], c='k', ls='-')
+    ax.axvline(x_c[-1], c='k', ls='-')
+    ax.axhline(y_c[0], c='k', ls='-')
+    ax.axhline(y_c[-1], c='k', ls='-')
 
     ax = plt.subplot(gs[2, j])
     ratio = np.zeros_like(psf_fit)
@@ -124,19 +109,15 @@ for j in range(0, len(psf_names)):
     cb.set_label('Relative Difference')
     ax.set_xlabel('x / pixel')
     ax.set_ylabel('y / pixel')
+    ax.axvline(x_c[0], c='k', ls='-')
+    ax.axvline(x_c[-1], c='k', ls='-')
+    ax.axhline(y_c[0], c='k', ls='-')
+    ax.axhline(y_c[-1], c='k', ls='-')
 
     p = psf_comp[j].reshape(-1)
-    x_ = np.arange(-10, 10+1e-10, 0.01)
-    y_ = x_
-    dx_, dy_ = np.mean(np.diff(x_)), np.mean(np.diff(y_))
-    x_pc_, y_pc_ = np.append(x_ - dx_/2, x_[-1] + dx_/2), np.append(y_ - dy_/2, y_[-1] + dy_/2)
-    psf_fit_ = pmf.psf_fit_fun(p, x_, y_)
-    over_index_middle = 0.5
-    cut_int = (((x_.reshape(1, -1) + x_[0]) % 1.0 > over_index_middle - 1e-3) &
-               ((x_.reshape(1, -1) + x_[0]) % 1.0 < over_index_middle + 1e-3) &
-               ((y_.reshape(-1, 1) + y_[0]) % 1.0 > over_index_middle - 1e-3) &
-               ((y_.reshape(-1, 1) + y_[0]) % 1.0 < over_index_middle + 1e-3))
-    print(np.sum(psf_fit_[cut_int]))
+    print(psf_comp[j])
+    x_, y_ = np.arange(-20, 20.1, 1), np.arange(-20, 20.1, 1)
+    print(np.sum(pmf.psf_fit_fun(p, x_, y_)))
     ax = plt.subplot(gs[3, j])
     ratio = (psf_fit - psf_image)
     ratio_ma = np.ma.array(ratio, mask=(psf_image == 0) & (psf_image > 1e-3))
@@ -148,6 +129,10 @@ for j in range(0, len(psf_names)):
     cb.set_label('Absolute Difference')
     ax.set_xlabel('x / pixel')
     ax.set_ylabel('y / pixel')
+    ax.axvline(x_c[0], c='k', ls='-')
+    ax.axvline(x_c[-1], c='k', ls='-')
+    ax.axhline(y_c[0], c='k', ls='-')
+    ax.axhline(y_c[-1], c='k', ls='-')
 
 plt.tight_layout()
 plt.savefig('psf_fit/test_psf_mog_test.pdf')

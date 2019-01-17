@@ -733,8 +733,27 @@ if __name__ == '__main__':
     psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
     psf_names = ['../PSFs/{}.fits'.format(q) for q in filters]
 
-    oversampling, noise_removal, N_comp, max_pix_offset = 4, 0, 20, 5
-    pmf.psf_mog_fitting([psf_names[0]], oversampling, noise_removal, psf_comp_filename, N_comp,
+    # from matplotlib.patches import Arc
+    # x0, y0 = 86, 86
+    # edges = [(0, 55), (0, 0), (172, 105), (0, 105), (172, 0), (55, 0)]
+    # gs = gridcreate('adads', 2, 3, 0.8, 5)
+    # axs = [plt.subplot(gs[i]) for i in range(0, len(edges))]
+    # xarray = np.arange(0, 173, 1)
+    # for edge, ax in zip(edges, axs):
+    #     x1, y1 = edge
+    #     grad = (y1 - y0) / (x1 - x0)
+    #     ax.plot(xarray, grad * (xarray - x1) + y1, 'k-')
+    #     angle = 180 - np.degrees(np.arctan(1/grad))
+    #     arc = Arc((86, 86), 30, 30, 90, 0, angle, color='r',
+    #               label=str(angle)+u"\u00b0")
+    #     ax.add_patch(arc)
+    #     ax.legend()
+    # plt.tight_layout()
+    # plt.savefig('psf_fit/test_angles.pdf')
+    # sys.exit()
+
+    oversampling, N_comp, max_pix_offset = 4, [15, 10], 5
+    pmf.psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
                         'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst', max_pix_offset)
     sys.exit()
 

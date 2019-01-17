@@ -40,16 +40,20 @@ def create_effective_psf(psf_, oversamp):
     # you lose oversamp/2 pixels at each edge, so overall lose oversamp pixels
     N = int(oversamp/2)
     psf = copy.deepcopy(psf_)
-    reduced_psf = np.empty((psf[0].data.shape[0]-2*N, psf[0].data.shape[1]-2*N), float)
-    print(psf[0].data.shape, reduced_psf.shape)
-    sys.exit()
-    for i in range(N, psf[0].data.shape[0]-N):
-        for j in range(N, psf[0].data.shape[1]-N):
+    # only have to remove the first (oversampled) pixel and the final oversampled (minus end of
+    # slie) pixels, as the "first" effective pixel -- the sum over the NxN finer resolution
+    # pixels -- will use the information from the sides, but we can remove the information
+    # subsequently
+    reduced_psf = np.empty((psf[0].data.shape[0] - 2*oversamp+1,
+                            psf[0].data.shape[1] - 2*oversamp+1), float)
+
+    for i in range(oversamp, psf[0].data.shape[0]-oversamp+1):
+        for j in range(oversamp, psf[0].data.shape[1]-oversamp+1):
             # because the "middle" of an NxN pixel grid is two lower but only one higher than the
             # specific pixel (i.e., p0 p1 [p2 is this pixel] p3), we only go +-N with python's
             # 'drop the last value' slicing; otherwise we'd sum 2N+1 data points for each
             # oversample, creating additional flux
-            reduced_psf[i-N, j-N] = np.sum(psf[0].data[i-N:i+N, j-N:j+N])
+            reduced_psf[i-oversamp, j-oversamp] = np.sum(psf[0].data[i-N:i+N, j-N:j+N])
     psf[0].data = reduced_psf
     psf[0].header['NAXIS1'] = reduced_psf.shape[0]
     psf[0].header['NAXIS2'] = reduced_psf.shape[1]
@@ -111,7 +115,6 @@ def psf_fit_min(p, x, y, z):
         model_zs[i] = ck * dfdcs[i]
         model_z += model_zs[i]
     dz = model_z - z
-    group_terms = 2 * dz
 
     jac = np.empty(len(p), float)
     # model_z is sum_j f_ij above
@@ -138,10 +141,9 @@ def psf_fit_min(p, x, y, z):
             dfda = dfdcs[i_set]
         # differential of sum_i (sum_j f_ij - z_i)**2 / o**2 is
         # sum_i (2 * (sum_j f_ij - z_i) * dfda / o**2)
-        dFda = np.sum(group_terms * dfda)
+        dFda = 2 * np.sum(dz * dfda)
         jac[i] = dFda
-    # group_terms includes a two for the jacobian; remove subsequently, but computationally cheaper
-    return 0.5 * np.sum(group_terms * dz), jac
+    return np.sum(dz * dz), jac
 
 
 class MyTakeStep(object):
@@ -155,10 +157,10 @@ class MyTakeStep(object):
         stepper = np.arange(0, len(x)//6).astype(int)
         x[0 + stepper] += np.random.uniform(-s, s, len(stepper))
         x[1 + stepper] += np.random.uniform(-s, s, len(stepper))
-        x[2 + stepper] += np.random.uniform(-min(s/100, 0.05), min(s/100, 0.05), len(stepper))
-        x[3 + stepper] += np.random.uniform(-min(s/100, 0.05), min(s/100, 0.05), len(stepper))
-        x[4 + stepper] += np.random.uniform(-min(s/50, 0.1), min(s/50, 0.1), len(stepper))
-        x[5 + stepper] += np.random.uniform(-min(s/10, 0.5), min(s/10, 0.5), len(stepper))
+        x[2 + stepper] += np.random.uniform(-min(s/20, 0.05), min(s/20, 0.05), len(stepper))
+        x[3 + stepper] += np.random.uniform(-min(s/20, 0.05), min(s/20, 0.05), len(stepper))
+        x[4 + stepper] += np.random.uniform(-min(s/5, 0.1), min(s/5, 0.1), len(stepper))
+        x[5 + stepper] += np.random.uniform(-min(s/3, 0.5), min(s/3, 0.5), len(stepper))
         return x
 
 
@@ -168,7 +170,7 @@ def psf_fitting_wrapper(iterable):
     if x0 is None:
         x0 = []
         for _ in range(0, N):
-            x0 = x0 + [x_cent - s + np.random.random()*2*s, y_cent - s + np.random.random()*2*s,
+            x0 = x0 + [np.random.normal(x_cent, 3*s), np.random.normal(y_cent, 3*s),
                        np.random.uniform(0.05, 0.3), np.random.uniform(0.05, 0.3),
                        np.random.uniform(0, 0.3), np.random.random()]
     take_step = MyTakeStep(stepsize=s)
@@ -203,7 +205,7 @@ def eq_con(x, g):
 
 
 def eq_con_jac(x, g):
-    # if f = sum_k c_k - g, then dfdc1 = 1 for all c_k; zero otherwise
+    # if f = sum_k c_k - g, then dfdc_1 = 1 for all c_k; zero otherwise
     return np.array([0, 0, 0, 0, 0, 1]*int(len(x)/6))
 
 
@@ -215,16 +217,14 @@ def background_mog_fit(p, x, y):
     y_ = np.exp(-0.5 * (y / c)**2)
     exp_xy = x_ * y_ / (2 * np.pi * c**2)
     f = np.sum(exp_xy)
-    print(f)
     dfdc = np.sum(exp_xy * ((x**2 + y**2) / c**3 - 2/c))
     return (f - 1)**2, np.array([2 * (f - 1) * dfdc])
 
 
-def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, N_comp, type_,
-                    max_pix_offset):
-    gs = gridcreate('adsq', 5, len(psf_names), 0.8, 5)
+def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_pix_offset):
+    gs = gridcreate('adsq', 4, len(psf_names), 0.8, 5)
     # assuming each gaussian component has mux, muy, sigx, sigy, rho, c
-    psf_comp = np.empty((len(psf_names), N_comp, 6), float)
+    psf_comp = np.empty((len(psf_names), N_comp[0]+4*N_comp[1]+1, 6), float)
     for j in range(0, len(psf_names)):
         print(j)
         f = pyfits.open(psf_names[j])
@@ -234,10 +234,8 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, N_com
         # psf_image = f[0].data[4, :, :]
         # #### WFIRST ####
         psf_image = f[0].data
-        print(psf_image.shape)
         x, y = np.arange(0, psf_image.shape[1])/oversamp, np.arange(0, psf_image.shape[0])/oversamp
         x_cent, y_cent = (x[-1]+x[0])/2, (y[-1]+y[0])/2
-        print(x_cent, y_cent, x[-1], y[-1])
         over_index_middle = 1 / 2
         cut_int = ((x.reshape(1, -1) % 1.0 == over_index_middle) &
                    (y.reshape(-1, 1) % 1.0 == over_index_middle))
@@ -246,40 +244,8 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, N_com
         y -= y_cent
         x_cent, y_cent = 0, 0
 
-        x_w = np.where((x >= -1 * max_pix_offset) & (x <= max_pix_offset))[0]
-        y_w = np.where((y >= -1 * max_pix_offset) & (y <= max_pix_offset))[0]
-        y_w0, y_w1, x_w0, x_w1 = np.amin(y_w), np.amax(y_w), np.amin(x_w), np.amax(x_w)
-
-        psf_image_c = np.copy(psf_image[y_w0:y_w1+1, x_w0:x_w1+1])
-        x_c, y_c = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
-        cut_int = ((x_c.reshape(1, -1) % 1.0 == over_index_middle) &
-                   (y_c.reshape(-1, 1) % 1.0 == over_index_middle))
-        cut_flux = np.sum(psf_image_c[cut_int])
-        print(cut_flux, total_flux, np.sum(psf_image_c), x_c, y_c, x, y)
-        print('issue is webbpsf not making sensible shaped PSF arrays; need 1 + 4*N as final shape to get reasonable zero-centered dx/dy...')
-        sys.exit()
-        ax = plt.subplot(gs[4, j])
-        psf_ratio = np.log10((np.abs(psf_image) / np.amax(psf_image)) + 1e-8)
-        norm = simple_norm(psf_ratio, 'linear', percent=100)
-        # with the psf being (y, x) we do not need to transpose it to correct for pcolormesh being
-        # flipped, but our x and y need additional tweaking, as these are pixel centers, but
-        # pcolormesh wants pixel edges. we thus subtract half a pixel off each value and add a
-        # final value to the end
-        dx, dy = np.mean(np.diff(x)), np.mean(np.diff(y))
-        x_pc, y_pc = np.append(x - dx/2, x[-1] + dx/2), np.append(y - dy/2, y[-1] + dy/2)
-        img = ax.pcolormesh(x_pc, y_pc, psf_ratio, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label('Log Absolute Relative PSF Response')
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
-        ax.axvline(x_c[0], c='k', ls='-')
-        ax.axvline(x_c[-1], c='k', ls='-')
-        ax.axhline(y_c[0], c='k', ls='-')
-        ax.axhline(y_c[-1], c='k', ls='-')
-
         ax = plt.subplot(gs[0, j])
-        ax.set_title(r'Cut flux is {:.3f}\% of total flux'.format(cut_flux/total_flux*100))
-        norm = simple_norm(psf_image, 'log', percent=99.9)
+        norm = simple_norm(psf_image, 'log', percent=100)
         # with the psf being (y, x) we do not need to transpose it to correct for pcolormesh being
         # flipped, but our x and y need additional tweaking, as these are pixel centers, but
         # pcolormesh wants pixel edges. we thus subtract half a pixel off each value and add a
@@ -292,25 +258,39 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, N_com
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
+        x_w = np.where((x >= -1 * max_pix_offset) & (x <= max_pix_offset))[0]
+        y_w = np.where((y >= -1 * max_pix_offset) & (y <= max_pix_offset))[0]
+        y_w0, y_w1, x_w0, x_w1 = np.amin(y_w), np.amax(y_w), np.amin(x_w), np.amax(x_w)
+        psf_image_c = np.copy(psf_image[y_w0:y_w1+1, x_w0:x_w1+1])
+        x_c, y_c = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
+        cut_int = ((x_c.reshape(1, -1) % 1.0 == over_index_middle) &
+                   (y_c.reshape(-1, 1) % 1.0 == over_index_middle))
+        cut_flux = np.sum(psf_image_c[cut_int])
+        ax.set_title(r'Cut flux is {:.3f}\% of total flux'.format(cut_flux/total_flux*100))
+        ax.axvline(x_c[0], c='k', ls='-')
+        ax.axvline(x_c[-1], c='k', ls='-')
+        ax.axhline(y_c[0], c='k', ls='-')
+        ax.axhline(y_c[-1], c='k', ls='-')
+
         temp = 0.01
 
         start = timeit.default_timer()
         N_pools = 12
-        N_overloop = 3
-        niters = 150
+        N_overloop = 4
+        niters = 250
         pool = multiprocessing.Pool(N_pools)
         counter = np.arange(0, N_pools*N_overloop)
-        xy_step = 2
+        xy_step = max_pix_offset/3
         x0 = None
         method = 'SLSQP'  # 'L-BFGS-B'
-        # we must constrain sum_k c_k = 1, to ensure flux preservation in convolution
+        # we must constrain sum_k c_k = cut_flux, to ensure flux preservation in convolution
         min_kwarg = {'method': method, 'args': (x_c, y_c, psf_image_c),
                      'jac': True, 'bounds': [(x_c[0], x_c[-1]), (y_c[0], y_c[-1]),
-                                             (1e-2, 5), (1e-2, 5), (-0.999, 0.999),
-                                             (None, None)]*N_comp,
+                                             (1e-1, 3), (1e-1, 3), (-0.9, 0.9),
+                                             (None, None)]*N_comp[0],
                      'constraints': {'type': 'eq', 'fun': eq_con, 'jac': eq_con_jac,
                                      'args': [cut_flux]}}
-        iter_rep = itertools.repeat([x_c, y_c, psf_image_c, x_cent, y_cent, N_comp, min_kwarg,
+        iter_rep = itertools.repeat([x_c, y_c, psf_image_c, x_cent, y_cent, N_comp[0], min_kwarg,
                                      niters, x0, xy_step, temp])
         iter_group = zip(counter, iter_rep)
         res = None
@@ -319,53 +299,97 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, N_com
             if min_val is None or stuff.fun < min_val:
                 res = stuff
                 min_val = stuff.fun
-
-        psf_comp[j, :, :] = res.x.reshape(N_comp, 6)
         p = res.x
 
-        # subtract off the current fit
-        # psf_small_fit = psf_image - psf_fit_fun(p, x, y)
-        # psf_small_fit[psf_image_c == 0] == 0
+        for xmin, xmax, ymin, ymax in zip(
+                [-1*max_pix_offset, -1*np.inf, -1*np.inf, max_pix_offset],
+                [np.inf, -1*max_pix_offset, max_pix_offset, np.inf],
+                [-1*np.inf, -1*np.inf, max_pix_offset, -1*max_pix_offset],
+                [-1*max_pix_offset, max_pix_offset, np.inf, np.inf]):
+            x_w2 = np.where((x > xmin) & (x <= xmax))[0]
+            y_w2 = np.where((y > ymin) & (y <= ymax))[0]
+            y_w02, y_w12, x_w02, x_w12 = np.amin(y_w2), np.amax(y_w2), np.amin(x_w2), np.amax(x_w2)
+            psf_image_c2 = np.copy(psf_image[y_w02:y_w12+1, x_w02:x_w12+1])
+            x_c2, y_c2 = x[x_w02:x_w12+1], y[y_w02:y_w12+1]
+            x_cent2, y_cent2 = np.mean(x), np.mean(y)
+            pool = multiprocessing.Pool(N_pools)
+            counter = np.arange(0, N_pools*N_overloop)
+            xy_step = psf_image.shape[1] - max_pix_offset
+            x0 = None
+            method = 'SLSQP'  # 'L-BFGS-B'
+            # we must constrain sum_k c_k = cut_flux, to ensure flux preservation in convolution
+            min_kwarg = {'method': method, 'args': (x_c2, y_c2, psf_image_c2),
+                         'jac': True, 'bounds': [(x_c2[0], x_c2[-1]), (y_c2[0], y_c2[-1]),
+                                                 (1e-1, 3), (1e-1, 3), (-0.9, 0.9),
+                                                 (None, None)]*N_comp[1],
+                         'constraints': {'type': 'eq', 'fun': eq_con, 'jac': eq_con_jac,
+                                         'args': [(1 - cut_flux)/4]}}
+            iter_rep = itertools.repeat([x_c2, y_c2, psf_image_c2, x_cent2, y_cent2, N_comp[1],
+                                         min_kwarg, niters, x0, xy_step, temp])
+            iter_group = zip(counter, iter_rep)
+            res = None
+            min_val = None
+            for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=N_overloop):
+                if min_val is None or stuff.fun < min_val:
+                    res = stuff
+                    min_val = stuff.fun
+            p = np.append(p, res.x)
 
-        # min_kwarg = {'method': method, 'args': (x, y, psf_small_fit),
-        #              'jac': True, 'bounds': [(x[0], x[-1]), (y[0], y[-1]),
-        #                                      (1e-5, 5), (1e-5, 5), (-0.999, 0.999),
-        #                                      (None, None)]*N_comp,
-        #              'constraints': {'type': 'eq', 'fun': eq_con, 'jac': eq_con_jac,
-        #                              'args': [1 - cut_flux]}}
-        # iter_rep = itertools.repeat([x, y, psf_small_fit, x_cent, y_cent, N_comp, min_kwarg,
-        #                              niters, x0, xy_step, temp])
-        # iter_group = zip(counter, iter_rep)
-        # res = None
-        # min_val = None
-        # for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=N_overloop):
-        #     if min_val is None or stuff.fun < min_val:
-        #         res = stuff
-        #         min_val = stuff.fun
-        # p = p + res.x
+        N_pools = 12
+        N_overloop = 4
+        niters = 30
+        pool = multiprocessing.Pool(N_pools)
+        counter = np.arange(0, N_pools*N_overloop)
+        xy_step = 0.25
+        x0 = p
+        method = 'SLSQP'  # 'L-BFGS-B'
+        # we must constrain sum_k c_k = cut_flux, to ensure flux preservation in convolution
+        min_kwarg = {'method': method, 'args': (x, y, psf_image),
+                     'jac': True, 'bounds': [(x[0], x[-1]), (y[0], y[-1]),
+                                             (1e-1, 3), (1e-1, 3), (-0.9, 0.9),
+                                             (None, None)]*(N_comp[0] + 4 * N_comp[1]),
+                     'constraints': {'type': 'eq', 'fun': eq_con, 'jac': eq_con_jac,
+                                     'args': [1]}}
+        iter_rep = itertools.repeat([x_c, y_c, psf_image_c, x_cent, y_cent,
+                                     (N_comp[0] + 4*N_comp[1]), min_kwarg, niters, x0, xy_step,
+                                     temp])
+        iter_group = zip(counter, iter_rep)
+        res = None
+        min_val = None
+        for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=N_overloop):
+            if min_val is None or stuff.fun < min_val:
+                res = stuff
+                min_val = stuff.fun
+        p = res.x
 
         # if we want the integral -- or sum -- over pixels r < 20 to be 1 - cut_flux then we need
         # to figure out what the sigma for that must be. the easiest way to try this is to just
         # pick an uncertainty at which the integral out to the PSF edge is some large, but not
         # quite unity, value. \int_0^20 r/c^2 exp(-0.5 r^2/c^2) dr = d solves as
-        # c ~ 10 sqrt(2) sqrt(-1 / ln(1 - d))
+        # c = 10 sqrt(2) sqrt(-1 / ln(1 - d))
+        x_int, y_int = np.arange(-20, 20.1, 1), np.arange(-20, 20.1, 1)
         int_lim = 0.99
         c_ = 10 * np.sqrt(2) * np.sqrt(-1 / np.log(1 - int_lim))
-        new_g = [0, 0, c_, c_, 0, 1 - cut_flux]
+        new_g = [0, 0, c_, c_, 0, 1 - np.sum(psf_fit_fun(p, x_int, y_int))]
         p = np.append(p, new_g)
+
+        psf_comp[j, :, :] = p.reshape(N_comp[0] + 4 * N_comp[1] + 1, 6)
 
         print(timeit.default_timer()-start)
         print(psf_fit_min(p, x, y, psf_image)[0])
         psf_fit = psf_fit_fun(p, x, y)
         ax = plt.subplot(gs[1, j])
-        norm = simple_norm(psf_fit, 'log', percent=99.9)
+        norm = simple_norm(psf_fit, 'log', percent=100)
         img = ax.pcolormesh(x_pc, y_pc, psf_fit, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('PSF Response')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
-        x_int, y_int = np.arange(-20, 20.1, 1), np.arange(-20, 20.1, 1)
-        ax.set_title('Model PSF sum: {}'.format(np.sum(psf_fit_fun(p, x_int, y_int))))
+        ax.set_title('Model PSF sum: {:.5f}'.format(np.sum(psf_fit_fun(p, x_int, y_int))))
+        ax.axvline(x_c[0], c='k', ls='-')
+        ax.axvline(x_c[-1], c='k', ls='-')
+        ax.axhline(y_c[0], c='k', ls='-')
+        ax.axhline(y_c[-1], c='k', ls='-')
 
         ax = plt.subplot(gs[2, j])
         ratio = np.zeros_like(psf_fit)
@@ -380,6 +404,10 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, N_com
         cb.set_label('Relative Difference')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
+        ax.axvline(x_c[0], c='k', ls='-')
+        ax.axvline(x_c[-1], c='k', ls='-')
+        ax.axhline(y_c[0], c='k', ls='-')
+        ax.axhline(y_c[-1], c='k', ls='-')
 
         ax = plt.subplot(gs[3, j])
         ratio = (psf_fit - psf_image)
@@ -392,6 +420,10 @@ def psf_mog_fitting(psf_names, oversamp, noise_removal, psf_comp_filename, N_com
         cb.set_label('Absolute Difference')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
+        ax.axvline(x_c[0], c='k', ls='-')
+        ax.axvline(x_c[-1], c='k', ls='-')
+        ax.axhline(y_c[0], c='k', ls='-')
+        ax.axhline(y_c[-1], c='k', ls='-')
 
     plt.tight_layout()
     plt.savefig('psf_fit/test_psf_mog_{}.pdf'.format(type_))
