@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import logging
 
 from astropy.visualization import simple_norm
+from scipy.ndimage import rotate
 from scipy.special import gammaincinv
 from astropy.table import Table
 import sncosmo
@@ -732,29 +733,120 @@ if __name__ == '__main__':
 
     psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
     psf_names = ['../PSFs/{}.fits'.format(q) for q in filters]
+    oversampling, N_comp, max_pix_offsets = 4, 20, [4, 4, 5, 6, 7, 7]
 
-    # from matplotlib.patches import Arc
-    # x0, y0 = 86, 86
-    # edges = [(0, 55), (0, 0), (172, 105), (0, 105), (172, 0), (55, 0)]
-    # gs = gridcreate('adads', 2, 3, 0.8, 5)
-    # axs = [plt.subplot(gs[i]) for i in range(0, len(edges))]
-    # xarray = np.arange(0, 173, 1)
-    # for edge, ax in zip(edges, axs):
-    #     x1, y1 = edge
-    #     grad = (y1 - y0) / (x1 - x0)
-    #     ax.plot(xarray, grad * (xarray - x1) + y1, 'k-')
-    #     angle = 180 - np.degrees(np.arctan(1/grad))
-    #     arc = Arc((86, 86), 30, 30, 90, 0, angle, color='r',
-    #               label=str(angle)+u"\u00b0")
-    #     ax.add_patch(arc)
-    #     ax.legend()
-    # plt.tight_layout()
-    # plt.savefig('psf_fit/test_angles.pdf')
-    # sys.exit()
+    # to fit for diffration spikes in the PSFs, we need to know where they are, so we have to pass
+    # the central pixel coordinates, and the approximate linear edge (from the center) each spike
+    # follows
+    x0, y0 = 86, 86
+    edges = [(55, 0), (0, 0), (172, 105), (0, 105), (172, 0), (55, 172)]
+    from matplotlib.patches import Arc
+    gs = gridcreate('adads', 1 + len(psf_names), 14, 1, 4)
+    xarray_ = np.arange(0, 173, 1)
 
-    oversampling, N_comp, max_pix_offset = 4, [15, 10], 5
+    oversamp = oversampling
+    for i, edge in enumerate(edges):
+        ax = plt.subplot(gs[0, i])
+        x1, y1 = edge
+        grad = (y1 - y0) / (x1 - x0)
+        # phi = tan^-1((x1 - x0)/(y1 - y0)), theta = 180 - phi; consider a RHTriangle with phi
+        # the inner triangle angle between the linear line and the y-axis
+        angle = 180 - np.degrees(np.arctan(1/grad))
+        yarray = grad * (xarray_ - x1) + y1
+        y_slice = (yarray >= 0) & (yarray < 173)
+        xarray = xarray_[y_slice]
+        yarray = yarray[y_slice]
+        a = 15
+        b = 2
+        # o' = R o R^-1 where R = (cos t, -sin t; sin t, cos t); o = (b^2, 0; 0, a^2); the result
+        # given in Combining Error Ellipses (Davis) is for o' = (b^2, 0; 0, a^2) which is a
+        # 'reverse' rotation to the one we want here (i.e., what rotation makes a y-axis aligned
+        # ellipse), which is the negative of the angle we want here; this only changes (a^2 - b^2)
+        # to (b^2 - a^2) as all other negative sign swaps cancel (either in a squaring or cos(x) =
+        # cos(-x); this leaves just sin(x) = - sin(-x))
+        t = np.radians(angle)
+        sx = np.sqrt(b**2 * np.cos(t)**2 + a**2 * np.sin(t)**2)
+        sy = np.sqrt(b**2 * np.sin(t)**2 + a**2 * np.cos(t)**2)
+        rho = (b**2 - a**2) * np.cos(t) * np.sin(t) / sx / sy
+        p = [0.5*(x0+xarray[0]), 0.5*(y0+yarray[0]), sx, sy, rho, 0.5]
+        p = p + [0.5*(x0+xarray[-1]), 0.5*(y0+yarray[-1]), sx, sy, rho, 0.5]
+        # in general, a rotation of x' = Rx gives x' = x cos t - y sin t; y' = x sin t + y cos t
+        psf_fit = pmf.psf_fit_fun(p, xarray_, xarray_)
+        norm = simple_norm(psf_fit, 'linear', percent=100)
+        dx, dy = np.mean(np.diff(xarray_)), np.mean(np.diff(xarray_))
+        x_pc = np.append(xarray_ - dx/2, xarray_[-1] + dx/2)
+        y_pc = np.append(xarray_ - dy/2, xarray_[-1] + dy/2)
+        img = ax.pcolormesh(x_pc, y_pc, psf_fit, cmap='viridis', norm=norm, edgecolors='face',
+                            shading='flat')
+
+        arc = Arc((86, 86), 30, 30, 90, 0, angle, color='r',
+                  label="{:.2f}{}".format(angle, u"\u00b0"))
+        ax.plot(xarray, yarray, 'k-')
+        ax.add_patch(arc)
+        ax.legend()
+        ax.set_xlim(0, 173)
+        ax.set_ylim(0, 173)
+
+    width = 3
+    x_slicing = np.arange(-1*width, width+1e-10, 1/oversamp)
+    for j in range(0, len(psf_names)):
+        f = pyfits.open(psf_names[j])
+        psf_image = f[0].data
+        x, y = np.arange(0, psf_image.shape[1])/oversamp, np.arange(0, psf_image.shape[0])/oversamp
+        x_cent, y_cent = (x[-1]+x[0])/2, (y[-1]+y[0])/2
+        x -= x_cent
+        y -= y_cent
+        x, y = x.reshape(1, -1), y.reshape(-1, 1)
+        x_cent, y_cent = 0, 0
+        y_slicing = np.arange(max_pix_offsets[j], y[-1]+1e-10, 1/oversamp)
+        dx, dy = np.mean(np.diff(x_slicing)), np.mean(np.diff(y_slicing))
+        x_pc = np.append(x_slicing - dx/2, x_slicing[-1] + dx/2)
+        y_pc = np.append(y_slicing - dy/2, y_slicing[-1] + dy/2)
+        total_rotate_image = np.zeros((len(y_slicing), len(x_slicing)), float)
+        # dx, dy = np.mean(np.diff(x[0, :])), np.mean(np.diff(y[:, 0]))
+        # x_pc = np.append(x[0, :] - dx/2, x[0, :][-1] + dx/2)
+        # y_pc = np.append(y[:, 0] - dy/2, y[:, 0][-1] + dy/2)
+        # total_rotate_image = np.empty((len(y[:, 0]), len(x[0, :])), float)
+        for i, edge in enumerate(edges):
+            x1, y1 = edge
+            # convert the previously defined line points to the new, undersampled and centered
+            # pixel coordinates
+            x1, y1 = (x1 - x0) / oversamp, (y1 - y0) / oversamp
+            grad = (y1 - y_cent) / (x1 - x_cent)
+            # phi = tan^-1((x1 - x0)/(y1 - y0)), theta = 180 - phi; consider a RHTriangle with phi
+            # the inner triangle angle between the linear line and the y-axis
+            angle = 180 - np.degrees(np.arctan(1/grad))
+            rotate_image = rotate(psf_image, -1*angle, reshape=False)
+            for k in range(0, 2):
+                ax = plt.subplot(gs[1+j, 2*i + k])
+                cut = (x >= -1*width) & (x <= width)
+                if k == 0:
+                    cut = cut & (y <= -1 * max_pix_offsets[j])
+                else:
+                    cut = cut & (y >= max_pix_offsets[j])
+                new_cut_image = rotate_image[cut].reshape(len(y_slicing), 2*width*oversamp+1)
+                norm = simple_norm(new_cut_image, 'log', percent=100)
+                if k == 0:
+                    new_cut_image = new_cut_image[::-1, :]
+                total_rotate_image = total_rotate_image + new_cut_image
+                img = ax.pcolormesh(x_pc, y_pc, new_cut_image, cmap='viridis', norm=norm,
+                                    edgecolors='face', shading='flat')
+        total_rotate_image /= (2 * len(edges))
+        ax = plt.subplot(gs[1+j, 12])
+        norm = simple_norm(total_rotate_image, 'log', percent=100)
+        img = ax.pcolormesh(x_pc, y_pc, total_rotate_image, cmap='viridis', norm=norm,
+                            edgecolors='face', shading='flat')
+    # TODO: MoG the composite image, then add to each dx, dy, dtheta spike; have to translate
+    # ox/oy/rho to a/b/theta, rotate (+- 180 for each spike, to get the orientation correct), and
+    # then translate back to ox/oy/rho
+
+    plt.tight_layout()
+    plt.savefig('psf_fit/test_angles.pdf')
+    sys.exit()
+
     pmf.psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
-                        'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst', max_pix_offset)
+                        'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst', max_pix_offset,
+                        (x0, y0), edges)
     sys.exit()
 
     f = pyfits.open('../err_rdrk_wfi.fits')

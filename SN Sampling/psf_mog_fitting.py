@@ -221,10 +221,20 @@ def background_mog_fit(p, x, y):
     return (f - 1)**2, np.array([2 * (f - 1) * dfdc])
 
 
-def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_pix_offset):
+def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_pix_offset,
+                    center, diff_edges):
     gs = gridcreate('adsq', 4, len(psf_names), 0.8, 5)
-    # assuming each gaussian component has mux, muy, sigx, sigy, rho, c
-    psf_comp = np.empty((len(psf_names), N_comp[0]+4*N_comp[1]+1, 6), float)
+    # assuming each gaussian component has mux, muy, sigx, sigy, rho, c, and that we fit for
+    # N_comp Gaussians in the central region, and fit each diffration spike separately
+    psf_comp = np.empty((len(psf_names), N_comp + 12, 6), float)
+    diff_angles = np.empty(12, float)
+    x0, y0 = center
+    for i, edge in enumerate(diff_edges):
+        x1, y1 = edge
+        grad = (y1 - y0) / (x1 - x0)
+        angle = 180 - np.degrees(np.arctan(1/grad))
+        diff_angles[[i, i+len(diff_edges)]] = angle
+
     for j in range(0, len(psf_names)):
         print(j)
         f = pyfits.open(psf_names[j])
@@ -252,7 +262,8 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
         # final value to the end
         dx, dy = np.mean(np.diff(x)), np.mean(np.diff(y))
         x_pc, y_pc = np.append(x - dx/2, x[-1] + dx/2), np.append(y - dy/2, y[-1] + dy/2)
-        img = ax.pcolormesh(x_pc, y_pc, psf_image, cmap='viridis', norm=norm, edgecolors='face', shading='flat')
+        img = ax.pcolormesh(x_pc, y_pc, psf_image, cmap='viridis', norm=norm, edgecolors='face',
+                            shading='flat')
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('PSF Response')
         ax.set_xlabel('x / pixel')
@@ -287,72 +298,11 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
         min_kwarg = {'method': method, 'args': (x_c, y_c, psf_image_c),
                      'jac': True, 'bounds': [(x_c[0], x_c[-1]), (y_c[0], y_c[-1]),
                                              (1e-1, 3), (1e-1, 3), (-0.9, 0.9),
-                                             (None, None)]*N_comp[0],
+                                             (None, None)]*N_comp,
                      'constraints': {'type': 'eq', 'fun': eq_con, 'jac': eq_con_jac,
                                      'args': [cut_flux]}}
-        iter_rep = itertools.repeat([x_c, y_c, psf_image_c, x_cent, y_cent, N_comp[0], min_kwarg,
+        iter_rep = itertools.repeat([x_c, y_c, psf_image_c, x_cent, y_cent, N_comp, min_kwarg,
                                      niters, x0, xy_step, temp])
-        iter_group = zip(counter, iter_rep)
-        res = None
-        min_val = None
-        for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=N_overloop):
-            if min_val is None or stuff.fun < min_val:
-                res = stuff
-                min_val = stuff.fun
-        p = res.x
-
-        for xmin, xmax, ymin, ymax in zip(
-                [-1*max_pix_offset, -1*np.inf, -1*np.inf, max_pix_offset],
-                [np.inf, -1*max_pix_offset, max_pix_offset, np.inf],
-                [-1*np.inf, -1*np.inf, max_pix_offset, -1*max_pix_offset],
-                [-1*max_pix_offset, max_pix_offset, np.inf, np.inf]):
-            x_w2 = np.where((x > xmin) & (x <= xmax))[0]
-            y_w2 = np.where((y > ymin) & (y <= ymax))[0]
-            y_w02, y_w12, x_w02, x_w12 = np.amin(y_w2), np.amax(y_w2), np.amin(x_w2), np.amax(x_w2)
-            psf_image_c2 = np.copy(psf_image[y_w02:y_w12+1, x_w02:x_w12+1])
-            x_c2, y_c2 = x[x_w02:x_w12+1], y[y_w02:y_w12+1]
-            x_cent2, y_cent2 = np.mean(x), np.mean(y)
-            pool = multiprocessing.Pool(N_pools)
-            counter = np.arange(0, N_pools*N_overloop)
-            xy_step = psf_image.shape[1] - max_pix_offset
-            x0 = None
-            method = 'SLSQP'  # 'L-BFGS-B'
-            # we must constrain sum_k c_k = cut_flux, to ensure flux preservation in convolution
-            min_kwarg = {'method': method, 'args': (x_c2, y_c2, psf_image_c2),
-                         'jac': True, 'bounds': [(x_c2[0], x_c2[-1]), (y_c2[0], y_c2[-1]),
-                                                 (1e-1, 3), (1e-1, 3), (-0.9, 0.9),
-                                                 (None, None)]*N_comp[1],
-                         'constraints': {'type': 'eq', 'fun': eq_con, 'jac': eq_con_jac,
-                                         'args': [(1 - cut_flux)/4]}}
-            iter_rep = itertools.repeat([x_c2, y_c2, psf_image_c2, x_cent2, y_cent2, N_comp[1],
-                                         min_kwarg, niters, x0, xy_step, temp])
-            iter_group = zip(counter, iter_rep)
-            res = None
-            min_val = None
-            for stuff in pool.imap_unordered(psf_fitting_wrapper, iter_group, chunksize=N_overloop):
-                if min_val is None or stuff.fun < min_val:
-                    res = stuff
-                    min_val = stuff.fun
-            p = np.append(p, res.x)
-
-        N_pools = 12
-        N_overloop = 4
-        niters = 30
-        pool = multiprocessing.Pool(N_pools)
-        counter = np.arange(0, N_pools*N_overloop)
-        xy_step = 0.25
-        x0 = p
-        method = 'SLSQP'  # 'L-BFGS-B'
-        # we must constrain sum_k c_k = cut_flux, to ensure flux preservation in convolution
-        min_kwarg = {'method': method, 'args': (x, y, psf_image),
-                     'jac': True, 'bounds': [(x[0], x[-1]), (y[0], y[-1]),
-                                             (1e-1, 3), (1e-1, 3), (-0.9, 0.9),
-                                             (None, None)]*(N_comp[0] + 4 * N_comp[1]),
-                     'constraints': {'type': 'eq', 'fun': eq_con, 'jac': eq_con_jac,
-                                     'args': [1]}}
-        iter_rep = itertools.repeat([x_c, y_c, psf_image_c, x_cent, y_cent,
-                                     (N_comp[0] + 4*N_comp[1]), min_kwarg, niters, x0, xy_step,
-                                     temp])
         iter_group = zip(counter, iter_rep)
         res = None
         min_val = None
@@ -367,13 +317,13 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
         # pick an uncertainty at which the integral out to the PSF edge is some large, but not
         # quite unity, value. \int_0^20 r/c^2 exp(-0.5 r^2/c^2) dr = d solves as
         # c = 10 sqrt(2) sqrt(-1 / ln(1 - d))
-        x_int, y_int = np.arange(-20, 20.1, 1), np.arange(-20, 20.1, 1)
-        int_lim = 0.99
-        c_ = 10 * np.sqrt(2) * np.sqrt(-1 / np.log(1 - int_lim))
-        new_g = [0, 0, c_, c_, 0, 1 - np.sum(psf_fit_fun(p, x_int, y_int))]
-        p = np.append(p, new_g)
+        # x_int, y_int = np.arange(-20, 20.1, 1), np.arange(-20, 20.1, 1)
+        # int_lim = 0.99
+        # c_ = 10 * np.sqrt(2) * np.sqrt(-1 / np.log(1 - int_lim))
+        # new_g = [0, 0, c_, c_, 0, 1 - np.sum(psf_fit_fun(p, x_int, y_int))]
+        # p = np.append(p, new_g)
 
-        psf_comp[j, :, :] = p.reshape(N_comp[0] + 4 * N_comp[1] + 1, 6)
+        psf_comp[j, :, :] = p.reshape(N_comp+12, 6)
 
         print(timeit.default_timer()-start)
         print(psf_fit_min(p, x, y, psf_image)[0])
