@@ -221,7 +221,7 @@ def background_mog_fit(p, x, y):
     return (f - 1)**2, np.array([2 * (f - 1) * dfdc])
 
 
-def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_pix_offset,
+def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_pix_offsets,
                     center, diff_edges):
     gs = gridcreate('adsq', 4, len(psf_names), 0.8, 5)
     # assuming each gaussian component has mux, muy, sigx, sigy, rho, c, and that we fit for
@@ -269,8 +269,8 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
 
-        x_w = np.where((x >= -1 * max_pix_offset) & (x <= max_pix_offset))[0]
-        y_w = np.where((y >= -1 * max_pix_offset) & (y <= max_pix_offset))[0]
+        x_w = np.where((x >= -1 * max_pix_offsets[j]) & (x <= max_pix_offsets[j]))[0]
+        y_w = np.where((y >= -1 * max_pix_offsets[j]) & (y <= max_pix_offsets[j]))[0]
         y_w0, y_w1, x_w0, x_w1 = np.amin(y_w), np.amax(y_w), np.amin(x_w), np.amax(x_w)
         psf_image_c = np.copy(psf_image[y_w0:y_w1+1, x_w0:x_w1+1])
         x_c, y_c = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
@@ -287,11 +287,11 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
 
         start = timeit.default_timer()
         N_pools = 12
-        N_overloop = 4
-        niters = 250
+        N_overloop = 2
+        niters = 350
         pool = multiprocessing.Pool(N_pools)
         counter = np.arange(0, N_pools*N_overloop)
-        xy_step = max_pix_offset/3
+        xy_step = max_pix_offsets[j]/3
         x0 = None
         method = 'SLSQP'  # 'L-BFGS-B'
         # we must constrain sum_k c_k = cut_flux, to ensure flux preservation in convolution

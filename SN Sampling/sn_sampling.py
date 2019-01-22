@@ -733,25 +733,74 @@ if __name__ == '__main__':
 
     psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
     psf_names = ['../PSFs/{}.fits'.format(q) for q in filters]
-    oversampling, N_comp, max_pix_offsets = 4, 20, [4, 4, 5, 6, 7, 7]
+    oversampling, N_comp, max_pix_offsets = 4, 20, [6, 6, 6, 7, 8, 8]
 
     # to fit for diffration spikes in the PSFs, we need to know where they are, so we have to pass
     # the central pixel coordinates, and the approximate linear edge (from the center) each spike
     # follows
-    x0, y0 = 86, 86
-    edges = [(55, 0), (0, 0), (172, 105), (0, 105), (172, 0), (55, 172)]
-    from matplotlib.patches import Arc
-    gs = gridcreate('adads', 1 + len(psf_names), 14, 1, 4)
-    xarray_ = np.arange(0, 173, 1)
-
     oversamp = oversampling
-    for i, edge in enumerate(edges):
+    x0, y0 = 86, 86
+    edges = [(0, 103), (10, 172), (57, 172), (115, 172), (168, 172), (172, 103),
+             (0, 64), (3, 0), (53, 0), (117, 0), (172, 1), (172, 64)]
+    sides = ['u'] * 6 + ['d'] * 6
+    from matplotlib.patches import Arc
+    xarray_ = np.arange(0, 173, 1)
+    gs = gridcreate('bbb', 2, 3, 1, 5)
+    for j in range(0, len(psf_names)):
+        f = pyfits.open(psf_names[j])
+        psf_image = f[0].data
+
+        ax = plt.subplot(gs[j])
+        norm = simple_norm(psf_image, 'log', max_percent=75)
+        dx, dy = np.mean(np.diff(xarray_)), np.mean(np.diff(xarray_))
+        x_pc = np.append(xarray_ - dx/2, xarray_[-1] + dx/2)
+        y_pc = np.append(xarray_ - dy/2, xarray_[-1] + dy/2)
+        img = ax.pcolormesh(x_pc, y_pc, psf_image, cmap='viridis', norm=norm, edgecolors='face',
+                            shading='flat')
+        for edge, side in zip(edges, sides):
+            x1, y1 = edge
+            grad = (y1 - y0) / (x1 - x0)
+            angle = 180 - np.degrees(np.arctan(1/grad))
+            if (side == 'u' and angle > 90 and angle < 270) or (side == 'd' and (angle < 90 or
+                    angle > 270)):
+                angle = (angle + 180) % 360
+            yarray = grad * (xarray_ - x1) + y1
+            y_slice = (yarray >= 0) & (yarray <= 173)
+            if side == 'u':
+                y_slice = y_slice & (yarray > (173-1)/2)
+            else:
+                y_slice = y_slice & (yarray < (173-1)/2)
+            xarray = np.copy(xarray_[y_slice])
+            yarray = yarray[y_slice]
+            t = np.radians(angle)
+            ax.plot(xarray, yarray, 'r--')
+            x_y = np.array([[0], [max_pix_offsets[j]]])
+            R = np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
+            x_y_p = np.dot(R, x_y) * oversamp + np.array([[x0], [y0]])
+            ax.plot(x_y_p[0], x_y_p[1], 'g*', markersize=15)
+    plt.tight_layout()
+    plt.savefig('psf_fit/test_angle_psf.pdf')
+
+    gs = gridcreate('adads', 1 + len(psf_names), 14, 1, 4)
+    gs1 = gridcreate('13', len(psf_names), 4, 1, 5)
+    ax1s = [plt.subplot(gs1[j, 0]) for j in range(0, len(psf_names))]
+    ax2s = [plt.subplot(gs1[j, 1]) for j in range(0, len(psf_names))]
+    ax3s = [plt.subplot(gs1[j, 2]) for j in range(0, len(psf_names))]
+    ax4s = [plt.subplot(gs1[j, 3]) for j in range(0, len(psf_names))]
+    for i, (edge, side) in enumerate(zip(edges, sides)):
+        plt.figure('adads')
         ax = plt.subplot(gs[0, i])
         x1, y1 = edge
         grad = (y1 - y0) / (x1 - x0)
         # phi = tan^-1((x1 - x0)/(y1 - y0)), theta = 180 - phi; consider a RHTriangle with phi
         # the inner triangle angle between the linear line and the y-axis
         angle = 180 - np.degrees(np.arctan(1/grad))
+        # have to account for up/down-ness of the lines (for each spike in a roughly linear line),
+        # forcing "up" to be spikes 0-90 and 270-360 degrees east of north, and "down" spikes to
+        # the range 90-270
+        if (side == 'u' and angle > 90 and angle < 270) or (side == 'd' and (angle < 90 or
+                angle > 270)):
+            angle = (angle + 180) % 360
         yarray = grad * (xarray_ - x1) + y1
         y_slice = (yarray >= 0) & (yarray < 173)
         xarray = xarray_[y_slice]
@@ -768,8 +817,11 @@ if __name__ == '__main__':
         sx = np.sqrt(b**2 * np.cos(t)**2 + a**2 * np.sin(t)**2)
         sy = np.sqrt(b**2 * np.sin(t)**2 + a**2 * np.cos(t)**2)
         rho = (b**2 - a**2) * np.cos(t) * np.sin(t) / sx / sy
-        p = [0.5*(x0+xarray[0]), 0.5*(y0+yarray[0]), sx, sy, rho, 0.5]
-        p = p + [0.5*(x0+xarray[-1]), 0.5*(y0+yarray[-1]), sx, sy, rho, 0.5]
+        if angle < 180:
+            x_ = 0.5*(x0+xarray[0])
+        else:
+            x_ = 0.5*(x0+xarray[-1])
+        p = [x_, grad * (x_ - x1) + y1, sx, sy, rho, 0.5]
         # in general, a rotation of x' = Rx gives x' = x cos t - y sin t; y' = x sin t + y cos t
         psf_fit = pmf.psf_fit_fun(p, xarray_, xarray_)
         norm = simple_norm(psf_fit, 'linear', percent=100)
@@ -787,6 +839,8 @@ if __name__ == '__main__':
         ax.set_xlim(0, 173)
         ax.set_ylim(0, 173)
 
+    import multiprocessing
+    import itertools
     width = 3
     x_slicing = np.arange(-1*width, width+1e-10, 1/oversamp)
     for j in range(0, len(psf_names)):
@@ -807,7 +861,12 @@ if __name__ == '__main__':
         # x_pc = np.append(x[0, :] - dx/2, x[0, :][-1] + dx/2)
         # y_pc = np.append(y[:, 0] - dy/2, y[:, 0][-1] + dy/2)
         # total_rotate_image = np.empty((len(y[:, 0]), len(x[0, :])), float)
-        for i, edge in enumerate(edges):
+
+        ax1 = ax1s[j]
+        ax2 = ax2s[j]
+        ax3 = ax3s[j]
+        ax4 = ax4s[j]
+        for i, (edge, side) in enumerate(zip(edges, sides)):
             x1, y1 = edge
             # convert the previously defined line points to the new, undersampled and centered
             # pixel coordinates
@@ -816,32 +875,85 @@ if __name__ == '__main__':
             # phi = tan^-1((x1 - x0)/(y1 - y0)), theta = 180 - phi; consider a RHTriangle with phi
             # the inner triangle angle between the linear line and the y-axis
             angle = 180 - np.degrees(np.arctan(1/grad))
+            if (side == 'u' and angle > 90 and angle < 270) or (side == 'd' and (angle < 90 or
+                    angle > 270)):
+                angle = (angle + 180) % 360
             rotate_image = rotate(psf_image, -1*angle, reshape=False)
-            for k in range(0, 2):
-                ax = plt.subplot(gs[1+j, 2*i + k])
-                cut = (x >= -1*width) & (x <= width)
-                if k == 0:
-                    cut = cut & (y <= -1 * max_pix_offsets[j])
-                else:
-                    cut = cut & (y >= max_pix_offsets[j])
-                new_cut_image = rotate_image[cut].reshape(len(y_slicing), 2*width*oversamp+1)
-                norm = simple_norm(new_cut_image, 'log', percent=100)
-                if k == 0:
-                    new_cut_image = new_cut_image[::-1, :]
-                total_rotate_image = total_rotate_image + new_cut_image
-                img = ax.pcolormesh(x_pc, y_pc, new_cut_image, cmap='viridis', norm=norm,
-                                    edgecolors='face', shading='flat')
-        total_rotate_image /= (2 * len(edges))
+            plt.figure('adads')
+            ax = plt.subplot(gs[1+j, i])
+            cut = (x >= -1*width) & (x <= width) & (y >= max_pix_offsets[j])
+            new_cut_image = rotate_image[cut].reshape(len(y_slicing), 2*width*oversamp+1)
+            norm = simple_norm(new_cut_image, 'log', percent=100)
+            total_rotate_image = total_rotate_image + new_cut_image
+            img = ax.pcolormesh(x_pc, y_pc, new_cut_image, cmap='viridis', norm=norm,
+                                edgecolors='face', shading='flat')
+            plt.figure('13')
+            q = np.where(x_slicing == 0)[0][0]
+            ax1.plot(y_slicing, new_cut_image[:, q], 'k-')
+            ax2.plot(y_slicing, np.log10(new_cut_image[:, q]), 'k-')
+            for y_val, ls in zip([11, 14, 18], ['-', '--', ':']):
+                q = np.where(y_slicing == y_val)[0][0]
+                ax3.plot(x_slicing, new_cut_image[q], c='k', ls=ls)
+                ax4.plot(x_slicing, np.log10(new_cut_image[q]), c='k', ls=ls)
+        plt.figure('adads')
+        total_rotate_image /= len(edges)
         ax = plt.subplot(gs[1+j, 12])
         norm = simple_norm(total_rotate_image, 'log', percent=100)
         img = ax.pcolormesh(x_pc, y_pc, total_rotate_image, cmap='viridis', norm=norm,
                             edgecolors='face', shading='flat')
-    # TODO: MoG the composite image, then add to each dx, dy, dtheta spike; have to translate
-    # ox/oy/rho to a/b/theta, rotate (+- 180 for each spike, to get the orientation correct), and
-    # then translate back to ox/oy/rho
+        plt.figure('13')
+        q = np.where(x_slicing == 0)[0][0]
+        ax1.plot(y_slicing, total_rotate_image[:, q], 'r-')
+        ax2.plot(y_slicing, np.log10(total_rotate_image[:, q]), 'r-')
+        for y_val, ls in zip([11, 14, 18], ['-', '--', ':']):
+            q = np.where(y_slicing == y_val)[0][0]
+            qq = np.where(total_rotate_image[q] >= 0.5 * np.amax(total_rotate_image[q]))[0]
+            fwhm = x_slicing[qq[-1]] - x_slicing[qq[0]]
+            ax3.plot(x_slicing, total_rotate_image[q], c='r', ls=ls, label='{:.2f}'.format(fwhm))
+            ax4.plot(x_slicing, np.log10(total_rotate_image[q]), c='r', ls=ls)
 
+        ax3.legend()
+
+        # x_cent, y_cent = 0.5 * np.sum(x_slicing[[0, -1]]), 0.5 * np.sum(y_slicing[[0, -1]])
+        # temp = 0.01
+        # N_comp = 20
+        # N_pools = 12
+        # N_overloop = 1
+        # niters = 200
+        # pool = multiprocessing.Pool(N_pools)
+        # counter = np.arange(0, N_pools*N_overloop)
+        # xy_step = max_pix_offsets[j]/3
+        # x0_guess = None
+        # method = 'SLSQP'  # 'L-BFGS-B'
+        # min_kwarg = {'method': method, 'args': (x_slicing, y_slicing, total_rotate_image),
+        #              'jac': True, 'bounds': [(x_slicing[0], x_slicing[-1]), (y_slicing[0],
+        #                                      y_slicing[-1]), (1e-1, 3), (1e-1, 3), (-0.9, 0.9),
+        #                                      (None, None)]*N_comp,
+        #              'constraints': {'type': 'eq', 'fun': pmf.eq_con, 'jac': pmf.eq_con_jac,
+        #                              'args': [0.15/6]}}
+        # iter_rep = itertools.repeat([x_slicing, y_slicing, total_rotate_image, x_cent, y_cent,
+        #                              N_comp, min_kwarg, niters, x0_guess, xy_step, temp])
+        # iter_group = zip(counter, iter_rep)
+        # res = None
+        # min_val = None
+        # for stuff in pool.imap_unordered(pmf.psf_fitting_wrapper, iter_group,
+        #                                  chunksize=N_overloop):
+        #     if min_val is None or stuff.fun < min_val:
+        #         res = stuff
+        #         min_val = stuff.fun
+        # p = res.x
+        # ax = plt.subplot(gs[1+j, 13])
+        # spike_fit = pmf.psf_fit_fun(p, x_slicing, y_slicing)
+        # norm = simple_norm(spike_fit, 'log', percent=100)
+        # img = ax.pcolormesh(x_pc, y_pc, spike_fit, cmap='viridis', norm=norm,
+        #                     edgecolors='face', shading='flat')
+
+    plt.figure('adads')
     plt.tight_layout()
     plt.savefig('psf_fit/test_angles.pdf')
+    plt.figure('13')
+    plt.tight_layout()
+    plt.savefig('psf_fit/test_angles_psf_cut.pdf')
     sys.exit()
 
     pmf.psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
