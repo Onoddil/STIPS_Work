@@ -59,4 +59,4 @@ for dx, filter_, c in zip([-0.1, -0.05, 0, 0.05, 0.1, 0.15], filters,
 ax.set_xlabel(r'$\lambda$ / $\AA$')
 ax.set_ylabel('Flux')
 plt.tight_layout()
-plt.savefig('out_gals/spectrum_test.pdf')
+plt.savefig('spectrum_test.pdf')

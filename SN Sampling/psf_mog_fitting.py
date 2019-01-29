@@ -221,22 +221,15 @@ def background_mog_fit(p, x, y):
     return (f - 1)**2, np.array([2 * (f - 1) * dfdc])
 
 
-def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_pix_offsets,
-                    center, diff_edges):
-    gs = gridcreate('adsq', 4, len(psf_names), 0.8, 5)
+def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_pix_offsets, cuts):
+    gs = gridcreate('adsq', 5, len(psf_names), 0.8, 5)
     # assuming each gaussian component has mux, muy, sigx, sigy, rho, c, and that we fit for
     # N_comp Gaussians in the central region, and fit each diffration spike separately
-    psf_comp = np.empty((len(psf_names), N_comp + 12, 6), float)
-    diff_angles = np.empty(12, float)
-    x0, y0 = center
-    for i, edge in enumerate(diff_edges):
-        x1, y1 = edge
-        grad = (y1 - y0) / (x1 - x0)
-        angle = 180 - np.degrees(np.arctan(1/grad))
-        diff_angles[[i, i+len(diff_edges)]] = angle
+    psf_comp = np.empty((len(psf_names), N_comp + 1, 6), float)
 
     for j in range(0, len(psf_names)):
         print(j)
+        cut = cuts[j]
         f = pyfits.open(psf_names[j])
         # #### WFC3 ####
         # as WFC3-2016-12 suggests that fortran reads these files (x, y, N) we most likely read
@@ -273,6 +266,7 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
         y_w = np.where((y >= -1 * max_pix_offsets[j]) & (y <= max_pix_offsets[j]))[0]
         y_w0, y_w1, x_w0, x_w1 = np.amin(y_w), np.amax(y_w), np.amin(x_w), np.amax(x_w)
         psf_image_c = np.copy(psf_image[y_w0:y_w1+1, x_w0:x_w1+1])
+        # psf_image_c[psf_image_c < cut] = 0
         x_c, y_c = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
         cut_int = ((x_c.reshape(1, -1) % 1.0 == over_index_middle) &
                    (y_c.reshape(-1, 1) % 1.0 == over_index_middle))
@@ -286,7 +280,7 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
         temp = 0.01
 
         start = timeit.default_timer()
-        N_pools = 12
+        N_pools = 10
         N_overloop = 2
         niters = 350
         pool = multiprocessing.Pool(N_pools)
@@ -317,13 +311,13 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
         # pick an uncertainty at which the integral out to the PSF edge is some large, but not
         # quite unity, value. \int_0^20 r/c^2 exp(-0.5 r^2/c^2) dr = d solves as
         # c = 10 sqrt(2) sqrt(-1 / ln(1 - d))
-        # x_int, y_int = np.arange(-20, 20.1, 1), np.arange(-20, 20.1, 1)
-        # int_lim = 0.99
-        # c_ = 10 * np.sqrt(2) * np.sqrt(-1 / np.log(1 - int_lim))
-        # new_g = [0, 0, c_, c_, 0, 1 - np.sum(psf_fit_fun(p, x_int, y_int))]
-        # p = np.append(p, new_g)
+        x_int, y_int = np.arange(-20, 20.1, 1), np.arange(-20, 20.1, 1)
+        int_lim = 0.99
+        c_ = 10 * np.sqrt(2) * np.sqrt(-1 / np.log(1 - int_lim))
+        new_g = [0, 0, c_, c_, 0, 1 - np.sum(psf_fit_fun(p, x_int, y_int))]
+        p = np.append(p, new_g)
 
-        psf_comp[j, :, :] = p.reshape(N_comp+12, 6)
+        psf_comp[j, :, :] = p.reshape(N_comp + 1, 6)
 
         print(timeit.default_timer()-start)
         print(psf_fit_min(p, x, y, psf_image)[0])
@@ -374,6 +368,20 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
         ax.axvline(x_c[-1], c='k', ls='-')
         ax.axhline(y_c[0], c='k', ls='-')
         ax.axhline(y_c[-1], c='k', ls='-')
+
+        ax = plt.subplot(gs[4, j])
+        psf_x = np.copy(psf_image[y_w0:y_w1+1, x_w0:x_w1+1])
+        dx, dy = np.mean(np.diff(x_c)), np.mean(np.diff(y_c))
+        x_pc_c, y_pc_c = np.append(x_c - dx/2, x_c[-1] + dx/2), np.append(y_c - dy/2, y_c[-1] + dy/2)
+        norm = simple_norm(np.log10(psf_x), 'linear', percent=100)
+        img = ax.pcolormesh(x_pc_c, y_pc_c, np.log10(psf_x), cmap='viridis', norm=norm, edgecolors='face',
+                            shading='flat')
+        cut_flux = np.sum(psf_x[cut_int])
+        ax.set_title(r'Cut flux is {:.3f}\% of total flux'.format(cut_flux/total_flux*100))
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('PSF Response')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
 
     plt.tight_layout()
     plt.savefig('psf_fit/test_psf_mog_{}.pdf'.format(type_))

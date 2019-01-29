@@ -6,16 +6,14 @@ import numpy as np
 import astropy.io.fits as pyfits
 import matplotlib.pyplot as plt
 
-import logging
-
 from astropy.visualization import simple_norm
-from scipy.ndimage import rotate
 from scipy.special import gammaincinv
 from astropy.table import Table
 import sncosmo
 import astropy.units as u
 import timeit
 from scipy.ndimage import shift
+import glob
 
 import psf_mog_fitting as pmf
 
@@ -36,10 +34,10 @@ def model_number(run_minutes, n_runs):
     n = 7  # including R, eventually
     for k in np.arange(2, n+1):
         n_filt_choice += np.math.factorial(n) / np.math.factorial(k) / np.math.factorial(n - k)
-    # cadence can vary from, say, 5 days to 25 days (5 days being the minimum needed, and 25 days
+    # cadence can vary from, say, 5 days to 40 days (5 days being the minimum needed, and 25 days
     # giving 2 data points per lightcurve), so cadence could be varied in 5s initially, and thus
     cadence_interval = 5
-    cadences = np.arange(5, 25+1e-10, cadence_interval)
+    cadences = np.arange(5, 40+1e-10, cadence_interval)
     n_cadence = len(cadences)
 
     n_tot = n_filt_choice * n_cadence
@@ -129,7 +127,7 @@ def mog_galaxy(pixel_scale, filt_zp, psf_c, gal_params):
     len_image = np.ceil(2.2*offset_r / pixel_scale).astype(int)
     len_image = len_image + 1 if len_image % 2 == 0 else len_image
     len_image = max(25, len_image)
-    image = np.zeros((len_image, len_image), float)
+    image = np.zeros((len_image, len_image+2), float)
     x_cent, y_cent = (image.shape[0]-1)/2, (image.shape[1]-1)/2
 
     # positons should be in dimensionless but physical coordinates in terms of Re; first the
@@ -152,7 +150,6 @@ def mog_galaxy(pixel_scale, filt_zp, psf_c, gal_params):
     coords_t = np.transpose(np.array([[x], [y]]))
     # total flux in galaxy -- ensure that all units end up in flux as counts/s accordingly
     Sg = 10**(-1/2.5 * (mag - filt_zp))
-    Sg = 1
     for k in range(0, len(mks)):
         pk = pks[k]
         Vk = Vks[k]
@@ -173,26 +170,16 @@ def mog_galaxy(pixel_scale, filt_zp, psf_c, gal_params):
             # defined in pure pixel scale
             image += Sg * cm * pk * g_2d / (half_l_r / pixel_scale)**2
 
-    p = psf_c.reshape(-1)
-    x, y = np.arange(-10, 10+1e-10, 0.05), np.arange(-10, 10+1e-10, 0.05)
-    psf_fit = pmf.psf_fit_fun(p, x, y)
-    over_index_middle = 0.5
-    cut_int = (((x.reshape(1, -1) + x[0]) % 1.0 > over_index_middle - 1e-3) &
-               ((x.reshape(1, -1) + x[0]) % 1.0 < over_index_middle + 1e-3) &
-               ((y.reshape(-1, 1) + y[0]) % 1.0 > over_index_middle - 1e-3) &
-               ((y.reshape(-1, 1) + y[0]) % 1.0 < over_index_middle + 1e-3))
-    psf_sum = np.sum(psf_fit[cut_int])
-    print('gal', Sg, np.sum(image), psf_sum)
     return image
 
 
 def mog_add_psf(image, psf_params, filt_zp, psf_c):
     offset_ra_pix, offset_dec_pix, mag = psf_params
     x_cent, y_cent = (image.shape[0]-1)/2, (image.shape[1]-1)/2
-    xg = np.array([[(offset_ra_pix + x_cent) * pixel_scale],
-                   [(offset_dec_pix + y_cent) * pixel_scale]])
-    x_pos = (np.arange(0, image.shape[0])) * pixel_scale
-    y_pos = (np.arange(0, image.shape[1])) * pixel_scale
+    # unlike the MoG for the galaxy profile, the PSF can be fit entirely in pure pixel coordinates,
+    # with all parameters defined in this coordinate system
+    xg = np.array([[offset_ra_pix + x_cent], [offset_dec_pix + y_cent]])
+    x_pos, y_pos = np.arange(0, image.shape[0]), np.arange(0, image.shape[1])
     x, y = np.meshgrid(x_pos, y_pos, indexing='xy')
     # n-D gaussians have mahalnobis distance (x - mu)^T Sigma^-1 (x - mu) so coords_t and m_t
     # should be *row* vectors, and thus be shape (1, x) while coords and m should be column
@@ -209,14 +196,9 @@ def mog_add_psf(image, psf_params, filt_zp, psf_c):
     sx, sy, r = psf_c[:, 2], psf_c[:, 3], psf_c[:, 4]
     Vks = np.array([[[sx[q]**2, r[q]*sx[q]*sy[q]], [r[q]*sx[q]*sy[q], sy[q]**2]] for
                     q in range(0, len(sx))])
-    # convert PSF position and covariance matrix to arcseconds, from pixels
-    mks *= pixel_scale
-    Vks *= pixel_scale**2
 
     # total flux in source -- ensure that all units end up in flux as counts/s accordingly
     Sg = 10**(-1/2.5 * (mag - filt_zp))
-    Sg = 1
-    count = np.sum(image)
     for k in range(0, len(mks)):
         pk = pks[k]
         V = Vks[k]
@@ -226,15 +208,8 @@ def mog_add_psf(image, psf_params, filt_zp, psf_c):
         m = (mk + xg).reshape(1, 1, 2, 1)
         m_t = m.reshape(1, 1, 1, 2)
         g_2d = gaussian_2d(coords, coords_t, m, m_t, V)
-        # equivalent to the mog_galaxy version, we converted the covariance matrix to arcseconds
-        # so need to undo the unit change to get the correct dimensions, having fit for the PSF
-        # in pure pixels
-        image += Sg * pk * g_2d * pixel_scale**2
+        image += Sg * pk * g_2d
 
-    p = psf_c.reshape(-1)
-    x, y = np.arange(-9.5, 9.5+1e-10, 1), np.arange(-9.5, 9.5+1e-10, 1)
-    psf_sum = np.sum(pmf.psf_fit_fun(p, x, y))
-    print('SN', Sg, np.sum(image)-count, psf_sum)
     return image
 
 
@@ -250,14 +225,15 @@ def make_figures(filters, img_sn, img_no_sn, diff_img, exptime, directory, count
         ntimes_array = np.arange(0, ntimes)
         nfilts_array = np.arange(0, nfilts)
     if random_flag != 2:
-        gs = gridcreate('111', 3*ntimes, nfilts, 0.8, 15)
+        gs = gridcreate('111', 3*ntimes, nfilts, 0.8, 5)
+
     # if random_flag is False then k_ and k are the same, otherwise k_ should be 0 (or 0, 1, 2) if
     # random_flag allows for a larger-than-one subset in the future, while k can be (2, 6, 10, 50),
     # etc., striding at random
     for k_, k in enumerate(ntimes_array):
         for j_, j in enumerate(nfilts_array):
             if random_flag == 2:
-                gs = gridcreate('111', 3, 1, 0.8, 15)
+                gs = gridcreate('111', 3, 1, 0.8, 5)
             image = img_sn[k][j]
             image_shifted = img_no_sn[j]
             image_diff = diff_img[k][j]
@@ -392,11 +368,9 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     Rg = np.array([[-a * np.sin(t), b * np.cos(t)], [a * np.cos(t), b * np.sin(t)]])
     Vgm_unit = np.matmul(Rg, np.transpose(Rg))
 
-    offset_r = 2 * pixel_scale
-
     endflag = 0
     while endflag == 0:
-        # random offsets for star should be in arcseconds; pixel scale is 0.11 arcsecond/pixel
+        # random offsets for star should be in arcseconds
         rand_ra = -offset_r + np.random.random_sample() * 2 * offset_r
         rand_dec = -offset_r + np.random.random_sample() * 2 * offset_r
         # the full equation for a shifted, rotated ellipse, with semi-major axis
@@ -439,13 +413,13 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     # given some zodiacal light flux, in ergcm^-2s^-1A^-1arcsec^-2, flip given the ST ZP,
     # then convert back to flux
     zod_flux = 2e-18  # erg/cm^2/s/A/arcsec^2
+    zod_flux *= pixel_scale**2  # erg/cm^2/s/A[/pixel]
     zod_mag = -2.5 * np.log10(zod_flux) - 21.1  # st mag system
     zod_count = 10**(-1/2.5 * (zod_mag - filt_zp[0]))  # currently using an AB ZP...
     gal_params = [mu_0, n_type, e_disk, pa_disk, half_l_r, offset_r, Vgm_unit, mag]
     # currently assuming a simple half-pixel dither; TODO: check if this is right and update
     second_gal_offets = np.empty((nfilts, 2), float)
     for j in range(0, nfilts):
-        print(filters[j])
         # define a random pixel offset ra/dec
         offset_ra, offset_dec = np.random.uniform(0.01, 0.99), np.random.uniform(0.01, 0.99)
         sign = -1 if np.random.uniform(0, 1) < 0.5 else 1
@@ -456,12 +430,12 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
                            [offset_ra, offset_dec])
         q = np.where(image < 0)
         image[q] = 1e-8
-        # image = add_background(image, zod_count)
+        image = add_background(image, zod_count)
         image = set_exptime(image, exptime)
-        # image = add_poisson(image)
-        # image = mult_flat(image, flat_img)
-        # image = add_dark(image, dark_img)
-        # image = add_read(image, readnoise)
+        image = add_poisson(image)
+        image = mult_flat(image, flat_img)
+        image = add_dark(image, dark_img)
+        image = add_read(image, readnoise)
 
         # second_gal_offset is the pixel offset, relative to the central pixel, of the observation,
         # onto which we should shift the 'reference' frame. we therefore are asking given
@@ -470,7 +444,6 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
         # interpolates the shift as required.
         dx_, dy_ = second_gal_offets[j, 0] - offset_ra, second_gal_offets[j, 1] - offset_dec
         image = shift(image, [dx_, dy_], mode='nearest')
-
         images_without_sn.append(image)
 
     true_flux = []
@@ -478,7 +451,6 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
         images = []
         images_diff = []
         for j in range(0, nfilts):
-            print(filters[j], times[k])
             image_shifted = images_without_sn[j]
             # TODO: add exposure and readout time so that exposures are staggered in time
             time = times[k] + t0
@@ -512,12 +484,12 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
                                 filt_zp[j], psf_comp[j])
             q = np.where(image < 0)
             image[q] = 1e-8
-            # image = add_background(image, zod_count)
+            image = add_background(image, zod_count)
             image = set_exptime(image, exptime)
-            # image = add_poisson(image)
-            # image = mult_flat(image, flat_img)
-            # image = add_dark(image, dark_img)
-            # image = add_read(image, readnoise)
+            image = add_poisson(image)
+            image = mult_flat(image, flat_img)
+            image = add_dark(image, dark_img)
+            image = add_read(image, readnoise)
 
             images.append(image)
             image_diff = image - image_shifted
@@ -528,21 +500,29 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
 
             x_cent, y_cent = (image.shape[0]-1)/2, (image.shape[1]-1)/2
             xind, yind = np.floor(rand_ra / pixel_scale + x_cent).astype(int), np.floor(rand_dec / pixel_scale + y_cent).astype(int)
-            N = 4
 
+            N = 5
+            delta = np.arange(-N, N+1e-10, 1)
+            p = psf_comp[j].reshape(-1)
+            # rand_* is (fractional) pixel offset from centre, so we just modulo 1 to get single
+            # pixel fraction
+            dx, dy = (rand_ra/pixel_scale) % 1, (rand_dec/pixel_scale) % 1
+            psf_box_sum = np.sum(pmf.psf_fit_fun(p, delta+dx, delta+dy))
             # current naive sum the entire (box) 'aperture' flux of the Sn, correcting for
-            # exposure time in both counts and uncertainty
-            diff_sum = np.sum(image_diff[xind-N:xind+N+1, yind-N:yind+N+1]) / exptime
-            diff_sum = max(diff_sum, 0.01)
-            diff_sum_err = np.sqrt(np.sum(image[xind-N:xind+N+1, yind-N:yind+N+1] +
-                                   image_shifted[xind-N:xind+N+1, yind-N:yind+N+1])) / exptime
+            # exposure time in both counts and uncertainty; also have to correct for the lost flux
+            # outside of the box
+            xind0, xind1 = max(0, xind-N), min(image_diff.shape[0], xind+N+1)
+            yind0, yind1 = max(0, yind-N), min(image_diff.shape[1], yind+N+1)
+            diff_sum = np.sum(image_diff[xind0:xind1, yind0:yind1]) / exptime / psf_box_sum
+            diff_sum_err = np.sqrt(np.sum(image[xind0:xind1, yind0:yind1] +
+                                          image_shifted[xind0:xind1, yind0:yind1])) / \
+                exptime/psf_box_sum
             flux_array.append(diff_sum)
             fluxerr_array.append(diff_sum_err)
             zp_array.append(filt_zp[j])  # filter-specific zeropoint
             zpsys_array.append('ab')
 
             true_flux.append(10**(-1/2.5 * (m_ia - filt_zp[j])))
-            print(time, filters[j], true_flux[-1], flux_array[-1])
         images_with_sn.append(images)
         diff_images.append(images_diff)
 
@@ -556,6 +536,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     else:
         param_names += ['amplitude']
     sn_params = [sn_model[q] for q in param_names]
+
     return images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux
 
 
@@ -571,7 +552,7 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
     min_counts = 0.0001
     for i, sn_type in enumerate(sn_types):
         start = timeit.default_timer()
-        params = ['z', 't0']
+        params = ['t0']
         if sn_type == 'Ia':
             params += ['x0', 'x1', 'c']
         else:
@@ -590,11 +571,18 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         z_upper_count = np.empty(len(filters), float)
         z_lower_count = np.empty(len(filters), float)
         # the lower limits on z -- for this model -- are, assuming a minsnr detection in that
-        # filter, a model flux in the given system of, say, 0.001 counts/s; a very low goal, but
+        # filter, a model flux in the given system of, say, 0.0001 counts/s; a very low goal, but
         # one that avoids bluer SNe being selected when they would drop out of the detection. Also
         # avoids models from failing to calculate an amplitude... Similarly, we can calculate the
-        # maximum redshift for a blue filter to have a "detection".
+        # maximum redshift for a blue filter to have a "detection". If there is no detection in
+        # this filter, we set the redshift range to its maximum to remove the filter from
+        # consideration.
         for p in range(0, len(filters)):
+            snr_filt = lc_data_table['flux'].data[p] / lc_data_table['fluxerr'].data[p]
+            if snr_filt < minsnr:
+                z_upper_count[p] = z_array[-1]
+                z_lower_count[p] = z_array[0]
+                continue
             countrate = np.empty_like(z_array)
             for q, z_init in enumerate(z_array):
                 sn_model.set(z=z_init)
@@ -605,13 +593,14 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         # the set being fit here
         z_min = np.amax(z_lower_count)
         z_max = min(np.amin(z_upper_band), np.amin(z_upper_count))
-        bounds = {'z': (z_min, z_max)}
+        bounds = {}
         # x1 and c bounded by 3.5-sigma regions (x1: mu=0.4, sigma=0.9, c: mu=-0.04, sigma = 0.1)
         if sn_type == 'Ia':
             bounds.update({'x1': (-2.75, 3.55), 'c': (-0.39, 0.31)})
+
         result = None
         fitted_model = None
-        for z_init in np.linspace(z_min, z_max, 50):
+        for z_init in np.linspace(z_min, z_max, 15):
             sn_model.set(z=z_init)
             result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
                                                             bounds=bounds, minsnr=minsnr,
@@ -619,8 +608,15 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
             if result is None or result_temp.chisq < result.chisq:
                 result = result_temp
                 fitted_model = fitted_model_temp
-        # result, fitted_model = sncosmo.mcmc_lc(lc_data, sn_model, params, bounds=bounds,
-        #                                        minsnr=minsnr)
+
+        # after a round of minimising the lightcurve at fixed redshifts, add redshift to allow a
+        # final fit of the model to the data
+        bounds.update({'z': (z_min, z_max)})
+        params += ['z']
+        # fitted_model = sn_model
+        result, fitted_model = sncosmo.fit_lc(lc_data, fitted_model, params, bounds=bounds,
+                                              minsnr=minsnr, guess_z=False)
+
         bestfit_models.append(fitted_model)
         bestfit_results.append(result)
         try:
@@ -683,30 +679,30 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
 
 
 if __name__ == '__main__':
-    # run_mins, n_runs = 30/60, 100
-    # model_number(run_mins, n_runs)
+    run_mins, n_runs = 20/60, 100
+    model_number(run_mins, n_runs)
 
-    # sys.exit()
+    sys.exit()
 
     ngals = 10
     pixel_scale = 0.11  # arcsecond/pixel
     directory = 'out_gals'
 
     # TODO: vary these parameters
-    filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
+    filters_master = np.array(['z087', 'y106', 'w149', 'j129', 'h158', 'f184'])
     # 1 count/s for infinite aperture, hounsell17, AB magnitudes
-    filt_zp = [26.39, 26.41, 27.50, 26.35, 26.41, 25.96]
+    filt_zp_master = np.array([26.39, 26.41, 27.50, 26.35, 26.41, 25.96])
 
-    for j in range(0, len(filters)):
+    for j in range(0, len(filters_master)):
         f = pyfits.open('../../pandeia_data-1.0/wfirst/wfirstimager/filters/{}.fits'
-                        .format(filters[j]))
+                        .format(filters_master[j]))
         data = f[1].data
         dispersion = np.array([d[0] for d in data])
         transmission = np.array([d[1] for d in data])
         # both F184 and W149 extend 0.004 microns into 2 microns, beyond the wavelength range of
         # the less extended models, 19990A, or 1.999 microns. Thus we slightly chop the ends off
         # these filters, and set the final 'zero' to 1.998 microns:
-        if filters[j] == 'f184' or filters[j] == 'w149':
+        if filters_master[j] == 'f184' or filters_master[j] == 'w149':
             ind_ = np.where(dispersion < 1.999)[0][-1]
             transmission[ind_:] = 0
         q_ = np.argmax(transmission)
@@ -715,13 +711,13 @@ if __name__ == '__main__':
         imin = np.where(transmission[:q_] == 0)[0][-1]
         imax = np.where(transmission[q_:] == 0)[0][0] + q_ + 1
         bandpass = sncosmo.Bandpass(dispersion[imin:imax], transmission[imin:imax],
-                                    wave_unit=u.micron, name=filters[j])
+                                    wave_unit=u.micron, name=filters_master[j])
         sncosmo.register(bandpass)
     # TODO: vary exptime to explore the effects of exposure cadence on observation
     exptime = 1000  # seconds
     sn_types = ['Ia', 'Ib', 'Ic', 'II']
 
-    t_low, t_high, t_interval = -10, 35, 15
+    t_low, t_high, t_interval = -5, 35, 30
     times = np.arange(t_low, t_high+1e-10, t_interval)
 
     # #### WFC3 PSFs ####
@@ -732,234 +728,12 @@ if __name__ == '__main__':
     # psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
 
     psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
-    psf_names = ['../PSFs/{}.fits'.format(q) for q in filters]
-    oversampling, N_comp, max_pix_offsets = 4, 20, [6, 6, 6, 7, 8, 8]
+    psf_names = ['../PSFs/{}.fits'.format(q) for q in filters_master]
+    oversampling, N_comp, max_pix_offsets, cuts = 4, 18, [6, 6, 6, 7, 8, 8], [0.0009, 0.0009, 0.0009, 0.0008, 0.0008, 0.0007]
 
-    # to fit for diffration spikes in the PSFs, we need to know where they are, so we have to pass
-    # the central pixel coordinates, and the approximate linear edge (from the center) each spike
-    # follows
-    oversamp = oversampling
-    x0, y0 = 86, 86
-    edges = [(0, 103), (10, 172), (57, 172), (115, 172), (168, 172), (172, 103),
-             (0, 64), (3, 0), (53, 0), (117, 0), (172, 1), (172, 64)]
-    sides = ['u'] * 6 + ['d'] * 6
-    from matplotlib.patches import Arc
-    xarray_ = np.arange(0, 173, 1)
-    gs = gridcreate('bbb', 2, 3, 1, 5)
-    for j in range(0, len(psf_names)):
-        f = pyfits.open(psf_names[j])
-        psf_image = f[0].data
-
-        ax = plt.subplot(gs[j])
-        norm = simple_norm(psf_image, 'log', max_percent=75)
-        dx, dy = np.mean(np.diff(xarray_)), np.mean(np.diff(xarray_))
-        x_pc = np.append(xarray_ - dx/2, xarray_[-1] + dx/2)
-        y_pc = np.append(xarray_ - dy/2, xarray_[-1] + dy/2)
-        img = ax.pcolormesh(x_pc, y_pc, psf_image, cmap='viridis', norm=norm, edgecolors='face',
-                            shading='flat')
-        for edge, side in zip(edges, sides):
-            x1, y1 = edge
-            grad = (y1 - y0) / (x1 - x0)
-            angle = 180 - np.degrees(np.arctan(1/grad))
-            if (side == 'u' and angle > 90 and angle < 270) or (side == 'd' and (angle < 90 or
-                    angle > 270)):
-                angle = (angle + 180) % 360
-            yarray = grad * (xarray_ - x1) + y1
-            y_slice = (yarray >= 0) & (yarray <= 173)
-            if side == 'u':
-                y_slice = y_slice & (yarray > (173-1)/2)
-            else:
-                y_slice = y_slice & (yarray < (173-1)/2)
-            xarray = np.copy(xarray_[y_slice])
-            yarray = yarray[y_slice]
-            t = np.radians(angle)
-            ax.plot(xarray, yarray, 'r--')
-            x_y = np.array([[0], [max_pix_offsets[j]]])
-            R = np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
-            x_y_p = np.dot(R, x_y) * oversamp + np.array([[x0], [y0]])
-            ax.plot(x_y_p[0], x_y_p[1], 'g*', markersize=15)
-    plt.tight_layout()
-    plt.savefig('psf_fit/test_angle_psf.pdf')
-
-    gs = gridcreate('adads', 1 + len(psf_names), 14, 1, 4)
-    gs1 = gridcreate('13', len(psf_names), 4, 1, 5)
-    ax1s = [plt.subplot(gs1[j, 0]) for j in range(0, len(psf_names))]
-    ax2s = [plt.subplot(gs1[j, 1]) for j in range(0, len(psf_names))]
-    ax3s = [plt.subplot(gs1[j, 2]) for j in range(0, len(psf_names))]
-    ax4s = [plt.subplot(gs1[j, 3]) for j in range(0, len(psf_names))]
-    for i, (edge, side) in enumerate(zip(edges, sides)):
-        plt.figure('adads')
-        ax = plt.subplot(gs[0, i])
-        x1, y1 = edge
-        grad = (y1 - y0) / (x1 - x0)
-        # phi = tan^-1((x1 - x0)/(y1 - y0)), theta = 180 - phi; consider a RHTriangle with phi
-        # the inner triangle angle between the linear line and the y-axis
-        angle = 180 - np.degrees(np.arctan(1/grad))
-        # have to account for up/down-ness of the lines (for each spike in a roughly linear line),
-        # forcing "up" to be spikes 0-90 and 270-360 degrees east of north, and "down" spikes to
-        # the range 90-270
-        if (side == 'u' and angle > 90 and angle < 270) or (side == 'd' and (angle < 90 or
-                angle > 270)):
-            angle = (angle + 180) % 360
-        yarray = grad * (xarray_ - x1) + y1
-        y_slice = (yarray >= 0) & (yarray < 173)
-        xarray = xarray_[y_slice]
-        yarray = yarray[y_slice]
-        a = 15
-        b = 2
-        # o' = R o R^-1 where R = (cos t, -sin t; sin t, cos t); o = (b^2, 0; 0, a^2); the result
-        # given in Combining Error Ellipses (Davis) is for o' = (b^2, 0; 0, a^2) which is a
-        # 'reverse' rotation to the one we want here (i.e., what rotation makes a y-axis aligned
-        # ellipse), which is the negative of the angle we want here; this only changes (a^2 - b^2)
-        # to (b^2 - a^2) as all other negative sign swaps cancel (either in a squaring or cos(x) =
-        # cos(-x); this leaves just sin(x) = - sin(-x))
-        t = np.radians(angle)
-        sx = np.sqrt(b**2 * np.cos(t)**2 + a**2 * np.sin(t)**2)
-        sy = np.sqrt(b**2 * np.sin(t)**2 + a**2 * np.cos(t)**2)
-        rho = (b**2 - a**2) * np.cos(t) * np.sin(t) / sx / sy
-        if angle < 180:
-            x_ = 0.5*(x0+xarray[0])
-        else:
-            x_ = 0.5*(x0+xarray[-1])
-        p = [x_, grad * (x_ - x1) + y1, sx, sy, rho, 0.5]
-        # in general, a rotation of x' = Rx gives x' = x cos t - y sin t; y' = x sin t + y cos t
-        psf_fit = pmf.psf_fit_fun(p, xarray_, xarray_)
-        norm = simple_norm(psf_fit, 'linear', percent=100)
-        dx, dy = np.mean(np.diff(xarray_)), np.mean(np.diff(xarray_))
-        x_pc = np.append(xarray_ - dx/2, xarray_[-1] + dx/2)
-        y_pc = np.append(xarray_ - dy/2, xarray_[-1] + dy/2)
-        img = ax.pcolormesh(x_pc, y_pc, psf_fit, cmap='viridis', norm=norm, edgecolors='face',
-                            shading='flat')
-
-        arc = Arc((86, 86), 30, 30, 90, 0, angle, color='r',
-                  label="{:.2f}{}".format(angle, u"\u00b0"))
-        ax.plot(xarray, yarray, 'k-')
-        ax.add_patch(arc)
-        ax.legend()
-        ax.set_xlim(0, 173)
-        ax.set_ylim(0, 173)
-
-    import multiprocessing
-    import itertools
-    width = 3
-    x_slicing = np.arange(-1*width, width+1e-10, 1/oversamp)
-    for j in range(0, len(psf_names)):
-        f = pyfits.open(psf_names[j])
-        psf_image = f[0].data
-        x, y = np.arange(0, psf_image.shape[1])/oversamp, np.arange(0, psf_image.shape[0])/oversamp
-        x_cent, y_cent = (x[-1]+x[0])/2, (y[-1]+y[0])/2
-        x -= x_cent
-        y -= y_cent
-        x, y = x.reshape(1, -1), y.reshape(-1, 1)
-        x_cent, y_cent = 0, 0
-        y_slicing = np.arange(max_pix_offsets[j], y[-1]+1e-10, 1/oversamp)
-        dx, dy = np.mean(np.diff(x_slicing)), np.mean(np.diff(y_slicing))
-        x_pc = np.append(x_slicing - dx/2, x_slicing[-1] + dx/2)
-        y_pc = np.append(y_slicing - dy/2, y_slicing[-1] + dy/2)
-        total_rotate_image = np.zeros((len(y_slicing), len(x_slicing)), float)
-        # dx, dy = np.mean(np.diff(x[0, :])), np.mean(np.diff(y[:, 0]))
-        # x_pc = np.append(x[0, :] - dx/2, x[0, :][-1] + dx/2)
-        # y_pc = np.append(y[:, 0] - dy/2, y[:, 0][-1] + dy/2)
-        # total_rotate_image = np.empty((len(y[:, 0]), len(x[0, :])), float)
-
-        ax1 = ax1s[j]
-        ax2 = ax2s[j]
-        ax3 = ax3s[j]
-        ax4 = ax4s[j]
-        for i, (edge, side) in enumerate(zip(edges, sides)):
-            x1, y1 = edge
-            # convert the previously defined line points to the new, undersampled and centered
-            # pixel coordinates
-            x1, y1 = (x1 - x0) / oversamp, (y1 - y0) / oversamp
-            grad = (y1 - y_cent) / (x1 - x_cent)
-            # phi = tan^-1((x1 - x0)/(y1 - y0)), theta = 180 - phi; consider a RHTriangle with phi
-            # the inner triangle angle between the linear line and the y-axis
-            angle = 180 - np.degrees(np.arctan(1/grad))
-            if (side == 'u' and angle > 90 and angle < 270) or (side == 'd' and (angle < 90 or
-                    angle > 270)):
-                angle = (angle + 180) % 360
-            rotate_image = rotate(psf_image, -1*angle, reshape=False)
-            plt.figure('adads')
-            ax = plt.subplot(gs[1+j, i])
-            cut = (x >= -1*width) & (x <= width) & (y >= max_pix_offsets[j])
-            new_cut_image = rotate_image[cut].reshape(len(y_slicing), 2*width*oversamp+1)
-            norm = simple_norm(new_cut_image, 'log', percent=100)
-            total_rotate_image = total_rotate_image + new_cut_image
-            img = ax.pcolormesh(x_pc, y_pc, new_cut_image, cmap='viridis', norm=norm,
-                                edgecolors='face', shading='flat')
-            plt.figure('13')
-            q = np.where(x_slicing == 0)[0][0]
-            ax1.plot(y_slicing, new_cut_image[:, q], 'k-')
-            ax2.plot(y_slicing, np.log10(new_cut_image[:, q]), 'k-')
-            for y_val, ls in zip([11, 14, 18], ['-', '--', ':']):
-                q = np.where(y_slicing == y_val)[0][0]
-                ax3.plot(x_slicing, new_cut_image[q], c='k', ls=ls)
-                ax4.plot(x_slicing, np.log10(new_cut_image[q]), c='k', ls=ls)
-        plt.figure('adads')
-        total_rotate_image /= len(edges)
-        ax = plt.subplot(gs[1+j, 12])
-        norm = simple_norm(total_rotate_image, 'log', percent=100)
-        img = ax.pcolormesh(x_pc, y_pc, total_rotate_image, cmap='viridis', norm=norm,
-                            edgecolors='face', shading='flat')
-        plt.figure('13')
-        q = np.where(x_slicing == 0)[0][0]
-        ax1.plot(y_slicing, total_rotate_image[:, q], 'r-')
-        ax2.plot(y_slicing, np.log10(total_rotate_image[:, q]), 'r-')
-        for y_val, ls in zip([11, 14, 18], ['-', '--', ':']):
-            q = np.where(y_slicing == y_val)[0][0]
-            qq = np.where(total_rotate_image[q] >= 0.5 * np.amax(total_rotate_image[q]))[0]
-            fwhm = x_slicing[qq[-1]] - x_slicing[qq[0]]
-            ax3.plot(x_slicing, total_rotate_image[q], c='r', ls=ls, label='{:.2f}'.format(fwhm))
-            ax4.plot(x_slicing, np.log10(total_rotate_image[q]), c='r', ls=ls)
-
-        ax3.legend()
-
-        # x_cent, y_cent = 0.5 * np.sum(x_slicing[[0, -1]]), 0.5 * np.sum(y_slicing[[0, -1]])
-        # temp = 0.01
-        # N_comp = 20
-        # N_pools = 12
-        # N_overloop = 1
-        # niters = 200
-        # pool = multiprocessing.Pool(N_pools)
-        # counter = np.arange(0, N_pools*N_overloop)
-        # xy_step = max_pix_offsets[j]/3
-        # x0_guess = None
-        # method = 'SLSQP'  # 'L-BFGS-B'
-        # min_kwarg = {'method': method, 'args': (x_slicing, y_slicing, total_rotate_image),
-        #              'jac': True, 'bounds': [(x_slicing[0], x_slicing[-1]), (y_slicing[0],
-        #                                      y_slicing[-1]), (1e-1, 3), (1e-1, 3), (-0.9, 0.9),
-        #                                      (None, None)]*N_comp,
-        #              'constraints': {'type': 'eq', 'fun': pmf.eq_con, 'jac': pmf.eq_con_jac,
-        #                              'args': [0.15/6]}}
-        # iter_rep = itertools.repeat([x_slicing, y_slicing, total_rotate_image, x_cent, y_cent,
-        #                              N_comp, min_kwarg, niters, x0_guess, xy_step, temp])
-        # iter_group = zip(counter, iter_rep)
-        # res = None
-        # min_val = None
-        # for stuff in pool.imap_unordered(pmf.psf_fitting_wrapper, iter_group,
-        #                                  chunksize=N_overloop):
-        #     if min_val is None or stuff.fun < min_val:
-        #         res = stuff
-        #         min_val = stuff.fun
-        # p = res.x
-        # ax = plt.subplot(gs[1+j, 13])
-        # spike_fit = pmf.psf_fit_fun(p, x_slicing, y_slicing)
-        # norm = simple_norm(spike_fit, 'log', percent=100)
-        # img = ax.pcolormesh(x_pc, y_pc, spike_fit, cmap='viridis', norm=norm,
-        #                     edgecolors='face', shading='flat')
-
-    plt.figure('adads')
-    plt.tight_layout()
-    plt.savefig('psf_fit/test_angles.pdf')
-    plt.figure('13')
-    plt.tight_layout()
-    plt.savefig('psf_fit/test_angles_psf_cut.pdf')
-    sys.exit()
-
-    pmf.psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
-                        'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst', max_pix_offset,
-                        (x0, y0), edges)
-    sys.exit()
+    # pmf.psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
+    #                     'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst', max_pix_offsets, cuts)
+    # sys.exit()
 
     f = pyfits.open('../err_rdrk_wfi.fits')
     # dark current is in counts/s, so requires correcting by the exosure time
@@ -971,11 +745,13 @@ if __name__ == '__main__':
     t0 = 50000
     minsnr = 5
 
-    ncol = min(3, len(filters))
+    ncol = min(3, len(filters_master))
 
     # flag for whether we should print a representative reference/science/difference image, or
-    # all of the frames - useful for avoiding huge figures
-    random_flag = 2
+    # all of the frames - useful for avoiding huge figures; 2 is "make a 3 frame image for all
+    # time/filter combinations", 1 is "make a single random time/filter 3 frame image", 0 is
+    # "make one large image for all time/filter combinations"; -1 is "don't make figures"
+    random_flag = 1
 
     # priors on supernovae types: very roughly, these are the relative fractions of each type in
     # the universe, to set the relative likelihoods of the observations with no information; these
@@ -995,10 +771,27 @@ if __name__ == '__main__':
     fit_params = np.ones((ngals, 6, 2), float) * -999
 
     i = 0
-    colours = ['k', 'r', 'b', 'g', 'c', 'm', 'orange']
+    colours_master = np.array(['k', 'r', 'b', 'g', 'c', 'm', 'orange'])
+
+    sub_inds = [0, 3, 4]
+    filters = filters_master[sub_inds]
+    filt_zp = filt_zp_master[sub_inds]
+    colours = colours_master[sub_inds]
 
     types = []
     probs = []
+
+    if len(filters) * len(times) <= 5:
+        print("Filter/cadence combination does not produce sufficient data points for fitting, please increase one or both parameters.")
+
+    if len(glob.glob('{}/galaxy_*.pdf'.format(directory))) > 0:
+        os.system('rm {}/galaxy_*.pdf'.format(directory))
+    if len(glob.glob('{}/fit_*.pdf'.format(directory))) > 0:
+        os.system('rm {}/fit_*.pdf'.format(directory))
+    if len(glob.glob('{}/flux_*.pdf'.format(directory))) > 0:
+        os.system('rm {}/flux_*.pdf'.format(directory))
+    if len(glob.glob('{}/derived_*.pdf'.format(directory))) > 0:
+        os.system('rm {}/derived_*.pdf'.format(directory))
 
     while i < ngals:
         type_ind = np.random.choice(len(sn_types))
@@ -1007,6 +800,7 @@ if __name__ == '__main__':
         images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux = \
             make_images(filters, pixel_scale, sn_types[type_ind], times, exptime, filt_zp,
                         psf_comp_filename, dark_img, flat_img, readnoise, t0)
+
         print("Make: {:.2f}s".format(timeit.default_timer()-start))
         lc_data_table = Table(data=lc_data,
                               names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
@@ -1027,10 +821,10 @@ if __name__ == '__main__':
             figtext.append('Type {}: $z = {:.3f}$\n$t_0 = {:.1f}$'.format(
                            sn_types[type_ind], z_, t_))
             figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
+        if random_flag != -1:
+            make_figures(filters, images_with_sn, images_without_sn, diff_images, exptime,
+                         directory, i+1, times, random_flag)
 
-        make_figures(filters, images_with_sn, images_without_sn, diff_images, exptime,
-                     directory, i+1, times, random_flag)
-        sys.exit()
         result, prob = fit_lc(lc_data_table, sn_types, directory, filters, i+1, figtext, ncol,
                               minsnr, sn_priors, filt_zp)
 
@@ -1038,12 +832,13 @@ if __name__ == '__main__':
         ax = plt.subplot(gs[0])
         for c, filter_ in zip(colours, filters):
             q = lc_data_table['band'] == filter_
-            ax.errorbar(lc_data_table['time'][q], lc_data_table['flux'][q] - true_flux[q],
-                        yerr=lc_data_table['fluxerr'][q], fmt='{}.'.format(c), label=filter_)
+            ax.errorbar(lc_data_table['time'][q], (lc_data_table['flux'][q] - true_flux[q]) /
+                        true_flux[q], yerr=lc_data_table['fluxerr'][q]/true_flux[q],
+                        fmt='{}.'.format(c), label=filter_)
         ax.legend(shadow=False, framealpha=0)
         ax.axhline(0, c='k', ls='--')
         ax.set_xlabel('Time')
-        ax.set_ylabel('Flux difference (fit - true)')
+        ax.set_ylabel('Flux difference (fit - true)/true')
         plt.tight_layout()
         plt.savefig('{}/flux_ratio_{}.pdf'.format(directory, i+1))
 
@@ -1051,7 +846,7 @@ if __name__ == '__main__':
             true_params[i, :-1] = sn_params
         else:
             true_params[i, [0, 1, -1]] = sn_params
-        print(result.param_names)
+
         if 'x0' in result.param_names:
             fit_params[i, :-1, 0] = result.parameters
             fit_params[i, :-1, 1] = [result.errors[q] for q in ['z', 't0', 'x0', 'x1', 'c']]
@@ -1068,7 +863,7 @@ if __name__ == '__main__':
 
         i += 1
 
-    gs_ = gridcreate('asjhfs', 2, 3, 0.8, 15)
+    gs_ = gridcreate('asjhfs', 2, 3, 0.8, 5)
     axs = [plt.subplot(gs_[i]) for i in range(0, 6)]
     for i, (ax, name) in enumerate(zip(axs, ['z', 't0', 'x0', 'x1', 'c', 'A'])):
         q = (fit_params[:, i, 0] > -999) & (true_params[:, i] > -999)
@@ -1082,4 +877,3 @@ if __name__ == '__main__':
 
     # TODO LIST:
     # 1) check k-corrections for SNANA lightcurves and get the best near/mid-IR lightcurves
-    # 2) find physical bounds for lightcurve fitting to avoid unphysical model outputs
