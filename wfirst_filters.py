@@ -18,17 +18,27 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
 
 gs = gridcreate('111', 1, 1, 0.8, 15)
 ax = plt.subplot(gs[0])
-filters = ['f184', 'h158', 'j129', 'w149', 'y106', 'z087']
-colours = ['k', 'r', 'b', 'g', 'c', 'm', 'orange']
-for filt, c in zip(filters, colours):
-    f = pyfits.open('../pandeia_data-1.0/wfirst/wfirstimager/filters/{}.fits'.format(filt))
+filters_master = ['r062', 'f184', 'h158', 'j129', 'w149', 'y106', 'z087']
+colours_master = ['k', 'r', 'b', 'g', 'c', 'm', 'orange']
+for j, (filt, c) in enumerate(zip(filters_master, colours_master)):
+    # f = pyfits.open('../pandeia_data-1.0/wfirst/wfirstimager/filters/{}.fits'.format(filt))
+    f = pyfits.open('../webbpsf-data/WFI/filters/{}_throughput.fits'.format(filt.upper()))
     data = f[1].data
-    x = [i[0] for i in data]
-    y = [i[1] for i in data]
-    ax.plot(x, y, c=c, label=filt)
+    dispersion = np.array([d[0] * 1e-4 for d in data])
+    transmission = np.array([d[1] * 0.95 for d in data])
+    if filters_master[j] == 'f184' or filters_master[j] == 'w149':
+        ind_ = np.where(dispersion < 1.999)[0][-1]
+        dispersion[ind_+1] = 1.9998
+        dispersion[ind_+2] = 1.99985
+    q_ = np.argmax(transmission)
+    if transmission[q_] == transmission[q_+1]:
+        q_ += 1
+    imin = np.where(transmission[:q_] == 0)[0][-1]
+    imax = np.where(transmission[q_:] == 0)[0][0] + q_ + 1
+    ax.plot(dispersion[imin:imax], transmission[imin:imax], c=c, label=filt)
 
 ax.legend()
-ax.set_xlabel('Wavelength / $\mu$m')
+ax.set_xlabel(r'Wavelength / $\mu$m')
 ax.set_ylabel('Throughput')
 plt.tight_layout()
 plt.savefig('wfirst_filters.pdf')

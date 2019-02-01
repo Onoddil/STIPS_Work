@@ -1,4 +1,4 @@
-from scipy.optimize import basinhopping, minimize
+from scipy.optimize import basinhopping
 import multiprocessing
 import itertools
 import timeit
@@ -266,7 +266,7 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
         y_w = np.where((y >= -1 * max_pix_offsets[j]) & (y <= max_pix_offsets[j]))[0]
         y_w0, y_w1, x_w0, x_w1 = np.amin(y_w), np.amax(y_w), np.amin(x_w), np.amax(x_w)
         psf_image_c = np.copy(psf_image[y_w0:y_w1+1, x_w0:x_w1+1])
-        # psf_image_c[psf_image_c < cut] = 0
+        psf_image_c[psf_image_c < cut] = 0
         x_c, y_c = x[x_w0:x_w1+1], y[y_w0:y_w1+1]
         cut_int = ((x_c.reshape(1, -1) % 1.0 == over_index_middle) &
                    (y_c.reshape(-1, 1) % 1.0 == over_index_middle))
@@ -379,6 +379,15 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
         cut_flux = np.sum(psf_x[cut_int])
         ax.set_title(r'Cut flux is {:.3f}\% of total flux'.format(cut_flux/total_flux*100))
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label('log$_{10}$(PSF Response)')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+
+        ax = plt.subplot(gs[5, j])
+        norm = simple_norm(psf_image_c, 'log', percent=100)
+        img = ax.pcolormesh(x_pc_c, y_pc_c, psf_image_c, cmap='viridis', norm=norm, edgecolors='face',
+                            shading='flat')
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label('PSF Response')
         ax.set_xlabel('x / pixel')
         ax.set_ylabel('y / pixel')
@@ -390,11 +399,32 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
 
 
 if __name__ == '__main__':
-    filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']
+    filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']  # 'r062'
     # psfs is a list of HDULists
     psfs = []
     reduced_psfs = []
     oversamp = 4
+
+    # import pysynphot as S
+    # f = pyfits.open('../../webbpsf-data/WFI/filters/Z087_throughput.fits')
+    # data = f[1].data
+    # w = np.array([d[0] for d in data])
+    # t = np.array([d[1] for d in data])
+    # band = S.ArrayBandpass(w, t, name='MyBandpass')
+    # spec = S.BlackBody(6000)
+    # spec_norm = spec.renorm(1, 'counts', band)
+    # obs = S.Observation(spec_norm, band)
+    # print(obs.effstim('abmag'))
+    # sys.exit()
+
+    # import os
+    # d, h = pyfits.getdata('../../webbpsf-data/WFI/filters/R062_throughput.fits', header=True)
+    # print(d[:10][0])
+    # print(repr(h))
+    # h['WAVEUNIT'] = 'angstrom'
+    # pyfits.writeto('../../webbpsf-data/WFI/filters/R062_throughput.fits', d, h, overwrite=True)
+    # os.system('imhead ../../webbpsf-data/WFI/filters/R062_throughput.fits')
+    # sys.exit()
 
     # with output_model set to 'both' HDUList [0] is the oversampled data and [1] is the
     # detector-binned data -- i.e., the created ePSF but sampled at pixel centers, which is thus

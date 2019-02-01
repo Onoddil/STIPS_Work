@@ -59,10 +59,8 @@ def gaussian_2d(x, x_t, mu, mu_t, sigma):
 
 # flat and dark can be loaded from the stips fits file or found elsewhere, they are simply input
 # files to be multipled/added to the original data.
-def add_dark(image, d):
-    # choice returns a random choice from np.arange(a) if just given a single integer a
-    x_i, y_j = (np.random.choice(d.shape[i]-image.shape[i]) for i in [0, 1])
-    image += d[x_i:x_i + image.shape[0], y_j:y_j + image.shape[1]]
+def add_dark(image, dark_current):
+    image += dark_current
     return image
 
 
@@ -213,82 +211,6 @@ def mog_add_psf(image, psf_params, filt_zp, psf_c):
     return image
 
 
-def make_figures(filters, img_sn, img_no_sn, diff_img, exptime, directory, counter, times,
-                 random_flag):
-    nfilts = len(filters)
-    ntimes = len(times)
-    if random_flag == 1:
-        ntimes_array = [np.random.choice(ntimes)]
-        nfilts_array = [np.random.choice(nfilts)]
-        ntimes, nfilts = 1, 1
-    else:
-        ntimes_array = np.arange(0, ntimes)
-        nfilts_array = np.arange(0, nfilts)
-    if random_flag != 2:
-        gs = gridcreate('111', 3*ntimes, nfilts, 0.8, 5)
-
-    # if random_flag is False then k_ and k are the same, otherwise k_ should be 0 (or 0, 1, 2) if
-    # random_flag allows for a larger-than-one subset in the future, while k can be (2, 6, 10, 50),
-    # etc., striding at random
-    for k_, k in enumerate(ntimes_array):
-        for j_, j in enumerate(nfilts_array):
-            if random_flag == 2:
-                gs = gridcreate('111', 3, 1, 0.8, 5)
-            image = img_sn[k][j]
-            image_shifted = img_no_sn[j]
-            image_diff = diff_img[k][j]
-            norm = simple_norm(image / exptime, 'linear', percent=99.9)
-            if random_flag != 2:
-                ax = plt.subplot(gs[0 + 3*k_, j_])
-            else:
-                ax = plt.subplot(gs[0])
-            img = ax.imshow(image.T / exptime, origin='lower', cmap='viridis', norm=norm)
-            cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-            cb.set_label('Count rate / e$^-$ s$^{-1}$')
-            ax.set_xlabel('x / pixel')
-            if j_ == 0:
-                ax.set_ylabel('Sn Observation, t = {} days\ny / pixel'.format(times[k]))
-            else:
-                ax.set_ylabel('y / pixel')
-            if k_ == 0:
-                ax.set_title(filters[j].upper())
-            if random_flag != 2:
-                ax = plt.subplot(gs[1 + 3*k_, j_])
-            else:
-                ax = plt.subplot(gs[1])
-            img = ax.imshow(image_shifted.T / exptime, origin='lower', cmap='viridis', norm=norm)
-            cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-            cb.set_label('Count rate / e$^-$ s$^{-1}$')
-            ax.set_xlabel('x / pixel')
-            if j_ == 0:
-                ax.set_ylabel('Sn Reference\ny / pixel')
-            else:
-                ax.set_ylabel('y / pixel')
-            norm = simple_norm(image_diff / exptime, 'linear', percent=99.9)
-
-            if random_flag != 2:
-                ax = plt.subplot(gs[2 + 3*k_, j_])
-            else:
-                ax = plt.subplot(gs[2])
-            img = ax.imshow(image_diff.T / exptime, origin='lower', cmap='viridis', norm=norm)
-            cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-            cb.set_label('Count rate / e$^-$ s$^{-1}$')
-            ax.set_xlabel('x / pixel')
-            if j_ == 0:
-                ax.set_ylabel('Difference\ny / pixel')
-            else:
-                ax.set_ylabel('y / pixel')
-            if random_flag == 2:
-                plt.tight_layout()
-                plt.savefig('{}/galaxy_{}_{}_{}.pdf'.format(directory, counter, filters[j_],
-                            times[k_]))
-                plt.close()
-    if random_flag != 2:
-        plt.tight_layout()
-        plt.savefig('{}/galaxy_{}.pdf'.format(directory, counter))
-        plt.close()
-
-
 def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
     # salt2 for Ia, s11-* where * is 2004hx for IIL/P, 2005hm for Ib, and 2006fo for Ic
     # draw salt2 x1 and c from salt2_parameters (gaussian, x1: x0=0.4, sigma=0.9, c: x0=-0.04,
@@ -325,7 +247,7 @@ def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
 
 
 def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp_filename,
-                dark_img, flat_img, readnoise, t0):
+                dark_current, flat_img, readnoise, t0, lambda_eff):
     nfilts = len(filters)
     ntimes = len(times)
 
@@ -411,11 +333,14 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     zpsys_array = []
 
     # given some zodiacal light flux, in ergcm^-2s^-1A^-1arcsec^-2, flip given the ST ZP,
-    # then convert back to flux
-    zod_flux = 2e-18  # erg/cm^2/s/A/arcsec^2
-    zod_flux *= pixel_scale**2  # erg/cm^2/s/A[/pixel]
-    zod_mag = -2.5 * np.log10(zod_flux) - 21.1  # st mag system
-    zod_count = 10**(-1/2.5 * (zod_mag - filt_zp[0]))  # currently using an AB ZP...
+    # then convert back to flux;
+    # see http://www.stsci.edu/hst/wfc3/documents/handbooks/currentIHB/c09_exposuretime08.html
+    zod_flux_st = 2e-18  # erg/cm^2/s/A/arcsec^2; Fl = c/l^2 Fv
+    # erg/cm^2/s/Hz/arcsec^2; l_eff in um; final conversion of 1e-10 makes it 1/(s^-1 ang^-1)
+    zod_flux = zod_flux_st / (3e8 / (lambda_eff*1e-6)**2 * 1e-10)
+    zod_flux *= pixel_scale**2  # erg/cm^2/s/Hz[/pixel]
+    zod_mag = -2.5 * np.log10(zod_flux) - 48.6  # AB mag system
+    zod_count = 10**(-1/2.5 * (zod_mag - filt_zp[0]))
     gal_params = [mu_0, n_type, e_disk, pa_disk, half_l_r, offset_r, Vgm_unit, mag]
     # currently assuming a simple half-pixel dither; TODO: check if this is right and update
     second_gal_offets = np.empty((nfilts, 2), float)
@@ -430,11 +355,11 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
                            [offset_ra, offset_dec])
         q = np.where(image < 0)
         image[q] = 1e-8
-        image = add_background(image, zod_count)
+        image = add_background(image, zod_count[j])
+        image = add_dark(image, dark_current)
         image = set_exptime(image, exptime)
         image = add_poisson(image)
         image = mult_flat(image, flat_img)
-        image = add_dark(image, dark_img)
         image = add_read(image, readnoise)
 
         # second_gal_offset is the pixel offset, relative to the central pixel, of the observation,
@@ -463,19 +388,6 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
             if np.isnan(m_ia):
                 m_ia = -2.5 * np.log10(0.01) + filt_zp[j]
 
-            # 'star' will have a distance based on the redshift of the galaxy, given by
-            # m - M = \mu = 42.38 - 5 log10(h) + 5 log10(z) + 5 log10(1+z) where h = 0.7
-            # (given by H0 = 100h km/s/Mpc), based on cz = H0d, \mu = 5 log10(dL) - 5, dL = (1+z)d,
-            # and 5log10(c/100km/s/Mpc / pc) = 42.38.
-            # h = 0.7
-            # mu = 42.38 - 5 * np.log10(h) + 5 * np.log10(z) + 5 * np.log10(1+z)
-            # dl = 10**(mu/5 + 1)
-            # M_ia = -19
-            # m_ia = M_ia + mu
-
-            # TODO: add background noise.
-            # background comes from jwst_backgrounds.background, converted from MJy/sr to
-            # mJy/pixel, converted to counts through the filter and zp I guess?
             # if cosmicrays are needed then figure out what stips does for that...
             offset_ra, offset_dec = second_gal_offets[j, :]
             image = mog_galaxy(pixel_scale, filt_zp[j], psf_comp[j],
@@ -484,11 +396,11 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
                                 filt_zp[j], psf_comp[j])
             q = np.where(image < 0)
             image[q] = 1e-8
-            image = add_background(image, zod_count)
+            image = add_background(image, zod_count[j])
+            image = add_dark(image, dark_current)
             image = set_exptime(image, exptime)
             image = add_poisson(image)
             image = mult_flat(image, flat_img)
-            image = add_dark(image, dark_img)
             image = add_read(image, readnoise)
 
             images.append(image)
@@ -545,13 +457,11 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
     x2s = np.empty(len(sn_types), float)
     bestfit_models = []
     bestfit_results = []
-    fit_time = 0
     largest_z = 2.5
     dz = 0.01
     z_array = np.arange(0, largest_z+1e-10, dz)
     min_counts = 0.0001
     for i, sn_type in enumerate(sn_types):
-        start = timeit.default_timer()
         params = ['t0']
         if sn_type == 'Ia':
             params += ['x0', 'x1', 'c']
@@ -578,7 +488,7 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         # this filter, we set the redshift range to its maximum to remove the filter from
         # consideration.
         for p in range(0, len(filters)):
-            snr_filt = lc_data_table['flux'].data[p] / lc_data_table['fluxerr'].data[p]
+            snr_filt = lc_data['flux'].data[p] / lc_data['fluxerr'].data[p]
             if snr_filt < minsnr:
                 z_upper_count[p] = z_array[-1]
                 z_lower_count[p] = z_array[0]
@@ -623,15 +533,18 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
             x2s[i] = result.chisq
         except AttributeError:
             x2s[i] = sncosmo.chisq(lc_data, fitted_model)
-        fit_time += timeit.default_timer()-start
-
-    print('Fit: {:.2f}s'.format(fit_time))
-    probs = sn_priors*np.exp(-0.5 * x2s)
+    # add a fire extinguisher null hypothesis probability
+    probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-5)
+    print(x2s, probs)
     probs /= np.sum(probs)
-    best_ind = np.argmax(probs)
+    best_ind = np.argmax(probs[:-1])
     best_r = bestfit_results[best_ind]
     best_m = bestfit_models[best_ind]
     best_x2 = x2s[best_ind]
+    if np.argmax(probs) == len(probs) - 1:
+        fit_type = 'None'
+    else:
+        fit_type = sn_types[best_ind]
 
     figtext = [figtext[0], figtext[1] + '\n' + r'$\chi^2_{{\nu={}}}$ = {:.3f}'.format(best_r.ndof,
                best_x2/best_r.ndof)]
@@ -670,138 +583,23 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         else:
             figtext.append('$A = {}$\n$P(Ia|D) = {:.3f}$'.format(A_format, probs[0]))
 
-    fig = sncosmo.plot_lc(lc_data, model=bestfit_models, xfigsize=15*ncol, tighten_ylim=False,
+    fig = sncosmo.plot_lc(lc_data, model=bestfit_models, xfigsize=5*ncol, tighten_ylim=False,
                           ncol=ncol, figtext=figtext, figtextsize=2, model_label=sn_types)
     fig.tight_layout(rect=[0, 0.03, 1, 0.935])
     fig.savefig('{}/fit_{}.pdf'.format(directory, counter))
 
-    return result, probs[0]
+    return probs[0], fit_type
 
 
-if __name__ == '__main__':
-    run_mins, n_runs = 20/60, 100
-    model_number(run_mins, n_runs)
-
-    sys.exit()
-
-    ngals = 10
-    pixel_scale = 0.11  # arcsecond/pixel
-    directory = 'out_gals'
-
-    # TODO: vary these parameters
-    filters_master = np.array(['z087', 'y106', 'w149', 'j129', 'h158', 'f184'])
-    # 1 count/s for infinite aperture, hounsell17, AB magnitudes
-    filt_zp_master = np.array([26.39, 26.41, 27.50, 26.35, 26.41, 25.96])
-
-    for j in range(0, len(filters_master)):
-        f = pyfits.open('../../pandeia_data-1.0/wfirst/wfirstimager/filters/{}.fits'
-                        .format(filters_master[j]))
-        data = f[1].data
-        dispersion = np.array([d[0] for d in data])
-        transmission = np.array([d[1] for d in data])
-        # both F184 and W149 extend 0.004 microns into 2 microns, beyond the wavelength range of
-        # the less extended models, 19990A, or 1.999 microns. Thus we slightly chop the ends off
-        # these filters, and set the final 'zero' to 1.998 microns:
-        if filters_master[j] == 'f184' or filters_master[j] == 'w149':
-            ind_ = np.where(dispersion < 1.999)[0][-1]
-            transmission[ind_:] = 0
-        q_ = np.argmax(transmission)
-        if transmission[q_] == transmission[q_+1]:
-            q_ += 1
-        imin = np.where(transmission[:q_] == 0)[0][-1]
-        imax = np.where(transmission[q_:] == 0)[0][0] + q_ + 1
-        bandpass = sncosmo.Bandpass(dispersion[imin:imax], transmission[imin:imax],
-                                    wave_unit=u.micron, name=filters_master[j])
-        sncosmo.register(bandpass)
-    # TODO: vary exptime to explore the effects of exposure cadence on observation
-    exptime = 1000  # seconds
-    sn_types = ['Ia', 'Ib', 'Ic', 'II']
-
-    t_low, t_high, t_interval = -5, 35, 30
-    times = np.arange(t_low, t_high+1e-10, t_interval)
-
-    # #### WFC3 PSFs ####
-    # psf_comp_filename = '../PSFs/wfc3_psf_comp.npy'
-    # filters = ['F160W']  # ['F105W', 'F125W', 'F160W']
-    # filt_zp = [25.95]  # [27.69, 28.02, 28.19] - st; [26.27, 26.23, 25.95] - ab
-    # pixel_scale = 0.13
-    # psf_names = ['../../../Buffalo/PSFSTD_WFC3IR_F{}W.fits'.format(q) for q in [105, 125, 160]]
-
-    psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
-    psf_names = ['../PSFs/{}.fits'.format(q) for q in filters_master]
-    oversampling, N_comp, max_pix_offsets, cuts = 4, 18, [6, 6, 6, 7, 8, 8], [0.0009, 0.0009, 0.0009, 0.0008, 0.0008, 0.0007]
-
-    # pmf.psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
-    #                     'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst', max_pix_offsets, cuts)
-    # sys.exit()
-
-    f = pyfits.open('../err_rdrk_wfi.fits')
-    # dark current is in counts/s, so requires correcting by the exosure time
-    dark_img = f[1].data * exptime
-    f = pyfits.open('../err_flat_wfi.fits')
-    flat_img = f[1].data
-    # currently what is in stips, claimed 'max ramp, lowest noise'
-    readnoise = 12
-    t0 = 50000
-    minsnr = 5
-
-    ncol = min(3, len(filters_master))
-
-    # flag for whether we should print a representative reference/science/difference image, or
-    # all of the frames - useful for avoiding huge figures; 2 is "make a 3 frame image for all
-    # time/filter combinations", 1 is "make a single random time/filter 3 frame image", 0 is
-    # "make one large image for all time/filter combinations"; -1 is "don't make figures"
-    random_flag = 1
-
-    # priors on supernovae types: very roughly, these are the relative fractions of each type in
-    # the universe, to set the relative likelihoods of the observations with no information; these
-    # should follow sn_types as [Ia, Ib, Ic, II]. Boissier & prantzos 2009 quote, roughly and
-    # drawn by eye: Ibc/II ~ 0.3, Ic/Ib ~ 1.25, Ia/CC ~ 0.25. Hakobyan 2014, table 8, give:
-    NiaNcc, NibcNii, NicNib = 0.44, 0.36, 2.12
-    # given a/b=x we get a = x/(1+x) and b = 1/(1+x) = 1 - x/(1+x), so we can convert these to
-    # relative fractions:
-    fia, fcc = NiaNcc / (1 + NiaNcc), 1 - NiaNcc / (1 + NiaNcc)
-    fibc, fii = fcc * NibcNii / (1 + NibcNii), fcc * (1 - NibcNii / (1 + NibcNii))
-    fib, fic = fibc * (1 - NicNib / (1 + NicNib)), fibc * NicNib / (1 + NicNib)
-    sn_priors = np.array([fia, fib, fic, fii])
-
-    # z, t0, x0, x1, c, A[mplitude], maintaining the ability to track Ia/CC, depending on which are
-    # randomly drawn
-    true_params = np.ones((ngals, 6), float) * -999
-    fit_params = np.ones((ngals, 6, 2), float) * -999
-
+def run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime, filt_zp, psf_comp_filename, dark_current, flat_img, readnoise, t0, lambda_eff):
+    probs, true_types, fit_types = [], [], []
     i = 0
-    colours_master = np.array(['k', 'r', 'b', 'g', 'c', 'm', 'orange'])
-
-    sub_inds = [0, 3, 4]
-    filters = filters_master[sub_inds]
-    filt_zp = filt_zp_master[sub_inds]
-    colours = colours_master[sub_inds]
-
-    types = []
-    probs = []
-
-    if len(filters) * len(times) <= 5:
-        print("Filter/cadence combination does not produce sufficient data points for fitting, please increase one or both parameters.")
-
-    if len(glob.glob('{}/galaxy_*.pdf'.format(directory))) > 0:
-        os.system('rm {}/galaxy_*.pdf'.format(directory))
-    if len(glob.glob('{}/fit_*.pdf'.format(directory))) > 0:
-        os.system('rm {}/fit_*.pdf'.format(directory))
-    if len(glob.glob('{}/flux_*.pdf'.format(directory))) > 0:
-        os.system('rm {}/flux_*.pdf'.format(directory))
-    if len(glob.glob('{}/derived_*.pdf'.format(directory))) > 0:
-        os.system('rm {}/derived_*.pdf'.format(directory))
-
     while i < ngals:
         type_ind = np.random.choice(len(sn_types))
-        print('==== {} == {} ===='.format(i+1, sn_types[type_ind]))
-        start = timeit.default_timer()
         images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux = \
             make_images(filters, pixel_scale, sn_types[type_ind], times, exptime, filt_zp,
-                        psf_comp_filename, dark_img, flat_img, readnoise, t0)
+                        psf_comp_filename, dark_current, flat_img, readnoise, t0, lambda_eff)
 
-        print("Make: {:.2f}s".format(timeit.default_timer()-start))
         lc_data_table = Table(data=lc_data,
                               names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
         if not np.amax(lc_data_table['flux'].data / lc_data_table['fluxerr'].data) >= minsnr:
@@ -821,14 +619,11 @@ if __name__ == '__main__':
             figtext.append('Type {}: $z = {:.3f}$\n$t_0 = {:.1f}$'.format(
                            sn_types[type_ind], z_, t_))
             figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
-        if random_flag != -1:
-            make_figures(filters, images_with_sn, images_without_sn, diff_images, exptime,
-                         directory, i+1, times, random_flag)
 
-        result, prob = fit_lc(lc_data_table, sn_types, directory, filters, i+1, figtext, ncol,
-                              minsnr, sn_priors, filt_zp)
+        prob, fit_type = fit_lc(lc_data_table, sn_types, directory, filters, i+1, figtext, ncol,
+                                minsnr, sn_priors, filt_zp)
 
-        gs = gridcreate('09', 1, 1, 0.8, 15)
+        gs = gridcreate('09', 1, 1, 0.8, 5)
         ax = plt.subplot(gs[0])
         for c, filter_ in zip(colours, filters):
             q = lc_data_table['band'] == filter_
@@ -842,38 +637,119 @@ if __name__ == '__main__':
         plt.tight_layout()
         plt.savefig('{}/flux_ratio_{}.pdf'.format(directory, i+1))
 
-        if sn_types[type_ind] == 'Ia':
-            true_params[i, :-1] = sn_params
-        else:
-            true_params[i, [0, 1, -1]] = sn_params
-
-        if 'x0' in result.param_names:
-            fit_params[i, :-1, 0] = result.parameters
-            fit_params[i, :-1, 1] = [result.errors[q] for q in ['z', 't0', 'x0', 'x1', 'c']]
-        else:
-            fit_params[i, [0, 1, -1], 0] = result.parameters
-            fit_params[i, [0, 1, -1], 1] = [result.errors[q] for q in ['z', 't0', 'amplitude']]
-
         # if the original SN is a Ia, then prob will be a "goodness of Ia-ness", but if the SN is
         # a CC (Ib/Ic/II) then the probability will be a "badness of CC-ness"; if we're fitting a
         # true Ia then we want the probability to be high, otherwise it should be low, but in
         # all cases the probability is P(Ia|D) = P(Ia) * p(D|Ia) / sum_j P(j) p(D|j)
-        types.append(sn_types[type_ind])
         probs.append(prob)
-
+        true_types.append(sn_types[type_ind])
+        fit_types.append(fit_type)
         i += 1
+    # as well as the overall goodness of Ia and badness of CC arrays, we should also pass back the
+    # false positive and false negative rates. FPs are non-Ias fit as Ias, and false negatives are
+    # Ias fit as non-Ias
+    probs, true_types, fit_types = np.array(probs), np.array(true_types), np.array(fit_types)
+    q = true_types == 'Ia'
+    goodness_of_ia = np.percentile(probs[q], [16, 50, 84])
+    badness_of_cc = np.percentile(probs[np.logical_not(q)], [16, 50, 84])
+    fp_rate = np.sum((true_types != 'Ia') & (fit_types == 'Ia')) / ngals
+    fn_rate = np.sum((true_types == 'Ia') & (fit_types != 'Ia')) / ngals
+    return goodness_of_ia, badness_of_cc, fp_rate, fn_rate
 
-    gs_ = gridcreate('asjhfs', 2, 3, 0.8, 5)
-    axs = [plt.subplot(gs_[i]) for i in range(0, 6)]
-    for i, (ax, name) in enumerate(zip(axs, ['z', 't0', 'x0', 'x1', 'c', 'A'])):
-        q = (fit_params[:, i, 0] > -999) & (true_params[:, i] > -999)
-        ax.errorbar(np.arange(1, ngals+1)[q], fit_params[q, i, 0] - true_params[q, i],
-                    yerr=fit_params[q, i, 1], fmt='k.')
-        ax.axhline(0, c='k', ls='--')
-        ax.set_xlabel('Count')
-        ax.set_ylabel('{} difference (fit - true)'.format(name))
-    plt.tight_layout()
-    plt.savefig('{}/derived_parameter_ratio.pdf'.format(directory))
 
-    # TODO LIST:
-    # 1) check k-corrections for SNANA lightcurves and get the best near/mid-IR lightcurves
+if __name__ == '__main__':
+    ngals = 10
+    # run_mins = 20/60
+    # model_number(run_mins, ngals)
+
+    # sys.exit()
+
+    pixel_scale = 0.11  # arcsecond/pixel
+    directory = 'out_gals'
+
+    filters_master = np.array(['z087', 'y106', 'w149', 'j129', 'h158', 'f184'])  # 'r062'
+    # 1 count/s for infinite aperture, hounsell17, AB magnitudes
+    filt_zp_master = np.array([26.39, 26.41, 27.50, 26.35, 26.41, 25.96])  # get r062 ZP if added
+    lambda_eff_master = np.array([0.862, 1.045, 1.251, 1.274, 1.555, 1.830])  # 0.601
+    for j in range(0, len(filters_master)):
+        f = pyfits.open('../../webbpsf-data/WFI/filters/{}_throughput.fits'.format(
+                        filters_master[j].upper()))
+        data = f[1].data
+        dispersion = np.array([d[0] * 1e-4 for d in data])
+        transmission = np.array([d[1] * 0.95 for d in data])
+        # both F184 and W149 extend 0.004 microns into 2 microns, beyond the wavelength range of
+        # the less extended models, 19990A, or 1.999 microns. Thus we slightly chop the ends off
+        # these filters, and set the final 'zero' to 1.998 microns:
+        if filters_master[j] == 'f184' or filters_master[j] == 'w149':
+            ind_ = np.where(dispersion < 1.999)[0][-1]
+            dispersion[ind_+1] = 1.9998
+            dispersion[ind_+2] = 1.99985
+        q_ = np.argmax(transmission)
+        if transmission[q_] == transmission[q_+1]:
+            q_ += 1
+        imin = np.where(transmission[:q_] == 0)[0][-1]
+        imax = np.where(transmission[q_:] == 0)[0][0] + q_ + 1
+        bandpass = sncosmo.Bandpass(dispersion[imin:imax], transmission[imin:imax],
+                                    wave_unit=u.micron, name=filters_master[j])
+        sncosmo.register(bandpass)
+    # default exptime assumes ~4 filter pointings in an hour, which is a zeroth order guess at the
+    # pbserving plan for WFIRST at present
+    exptime = 1000  # seconds
+    sn_types = ['Ia', 'Ib', 'Ic', 'II']
+
+    t_low, t_high, t_interval = -5, 35, 30
+    times = np.arange(t_low, t_high+1e-10, t_interval)
+
+    psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
+    psf_names = ['../PSFs/{}.fits'.format(q) for q in filters_master]
+    oversampling, N_comp, max_pix_offsets, cuts = 4, 20, [9, 9, 9, 10, 11, 11], [0.0009, 0.0009, 0.0009, 0.0008, 0.0008, 0.0007]
+
+    # pmf.psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
+    #                     'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst', max_pix_offsets, cuts)
+    # sys.exit()
+
+    # see https://wfirst.ipac.caltech.edu/sims/Param_db.html for details of parameters;
+    # dark current is in counts/s/pixel, so requires correcting by the exposure time
+    dark_current = 0.015
+    # TODO: check this is a good flat field array and update if necessary
+    f = pyfits.open('../err_flat_wfi.fits')
+    flat_img = f[1].data
+    # worst case requirement readout noise
+    readnoise = 20
+    t0 = 50000
+    minsnr = 5
+
+    ncol = min(3, len(filters_master))
+
+    # priors on supernovae types: very roughly, these are the relative fractions of each type in
+    # the universe, to set the relative likelihoods of the observations with no information; these
+    # should follow sn_types as [Ia, Ib, Ic, II]. Boissier & prantzos 2009 quote, roughly and
+    # drawn by eye: Ibc/II ~ 0.3, Ic/Ib ~ 1.25, Ia/CC ~ 0.25. Hakobyan 2014, table 8, give:
+    NiaNcc, NibcNii, NicNib = 0.44, 0.36, 2.12
+    # given a/b=x we get a = x/(1+x) and b = 1/(1+x) = 1 - x/(1+x), so we can convert these to
+    # relative fractions:
+    fia, fcc = NiaNcc / (1 + NiaNcc), 1 - NiaNcc / (1 + NiaNcc)
+    fibc, fii = fcc * NibcNii / (1 + NibcNii), fcc * (1 - NibcNii / (1 + NibcNii))
+    fib, fic = fibc * (1 - NicNib / (1 + NicNib)), fibc * NicNib / (1 + NicNib)
+    sn_priors = np.array([fia, fib, fic, fii])
+
+    colours_master = np.array(['k', 'r', 'b', 'g', 'c', 'm', 'orange'])
+
+    sub_inds = [0, 3, 4]
+    filters = filters_master[sub_inds]
+    filt_zp = filt_zp_master[sub_inds]
+    colours = colours_master[sub_inds]
+    lambda_eff = lambda_eff_master[sub_inds]
+
+    if len(filters) * len(times) <= 5:
+        print("Filter/cadence combination does not produce sufficient data points for fitting, please increase one or both parameters.")
+
+    if len(glob.glob('{}/fit_*.pdf'.format(directory))) > 0:
+        os.system('rm {}/fit_*.pdf'.format(directory))
+    if len(glob.glob('{}/flux_*.pdf'.format(directory))) > 0:
+        os.system('rm {}/flux_*.pdf'.format(directory))
+
+    g_ia, b_cc, fp, fn = run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime,
+                                                filt_zp, psf_comp_filename, dark_current, flat_img,
+                                                readnoise, t0, lambda_eff)
+    print(g_ia, b_cc, fp, fn)
