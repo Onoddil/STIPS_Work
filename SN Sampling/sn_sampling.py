@@ -452,6 +452,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     return images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux
 
 
+@profile
 def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr, sn_priors,
            filt_zp):
     x2s = np.empty(len(sn_types), float)
@@ -461,6 +462,8 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
     dz = 0.01
     z_array = np.arange(0, largest_z+1e-10, dz)
     min_counts = 0.0001
+
+    s = 0
     for i, sn_type in enumerate(sn_types):
         params = ['t0']
         if sn_type == 'Ia':
@@ -508,24 +511,27 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         if sn_type == 'Ia':
             bounds.update({'x1': (-2.75, 3.55), 'c': (-0.39, 0.31)})
 
-        result = None
-        fitted_model = None
-        for z_init in np.linspace(z_min, z_max, 15):
-            sn_model.set(z=z_init)
-            result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
-                                                            bounds=bounds, minsnr=minsnr,
-                                                            guess_z=False)
-            if result is None or result_temp.chisq < result.chisq:
-                result = result_temp
-                fitted_model = fitted_model_temp
+        s_ = timeit.default_timer()
+        # result = None
+        # fitted_model = None
+        # for z_init in np.linspace(z_min, z_max, 15):
+        #     sn_model.set(z=z_init)
+        #     result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
+        #                                                     bounds=bounds, minsnr=minsnr,
+        #                                                     guess_z=False)
+        #     if result is None or result_temp.chisq < result.chisq:
+        #         result = result_temp
+        #         fitted_model = fitted_model_temp
 
         # after a round of minimising the lightcurve at fixed redshifts, add redshift to allow a
         # final fit of the model to the data
         bounds.update({'z': (z_min, z_max)})
         params += ['z']
-        # fitted_model = sn_model
+        fitted_model = sn_model
         result, fitted_model = sncosmo.fit_lc(lc_data, fitted_model, params, bounds=bounds,
-                                              minsnr=minsnr, guess_z=False)
+                                              minsnr=minsnr)  # , guess_z=False)
+
+        s += timeit.default_timer()-s_
 
         bestfit_models.append(fitted_model)
         bestfit_results.append(result)
@@ -535,7 +541,7 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
             x2s[i] = sncosmo.chisq(lc_data, fitted_model)
     # add a fire extinguisher null hypothesis probability
     probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-5)
-    print(x2s, probs)
+    print('{:.2f}'.format(s), x2s, probs)
     probs /= np.sum(probs)
     best_ind = np.argmax(probs[:-1])
     best_r = bestfit_results[best_ind]
@@ -591,6 +597,7 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
     return probs[0], fit_type
 
 
+@profile
 def run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime, filt_zp, psf_comp_filename, dark_current, flat_img, readnoise, t0, lambda_eff):
     probs, true_types, fit_types = [], [], []
     i = 0
@@ -669,7 +676,10 @@ if __name__ == '__main__':
 
     filters_master = np.array(['z087', 'y106', 'w149', 'j129', 'h158', 'f184'])  # 'r062'
     # 1 count/s for infinite aperture, hounsell17, AB magnitudes
-    filt_zp_master = np.array([26.39, 26.41, 27.50, 26.35, 26.41, 25.96])  # get r062 ZP if added
+    # get r062 ZP if added; microsit uses 26.39 for both z087 and r602; microsit disagrees on h158
+    # by ~0.03 mags - full microsit ZPs are
+    # [26.39 r062] 26.39 26.42 [27.50 w149 mask, 27.61 no mask w149] [25.59 k208] 26.30 25.96
+    filt_zp_master = np.array([26.39, 26.41, 27.50, 26.35, 26.41, 25.96])
     lambda_eff_master = np.array([0.862, 1.045, 1.251, 1.274, 1.555, 1.830])  # 0.601
     for j in range(0, len(filters_master)):
         f = pyfits.open('../../webbpsf-data/WFI/filters/{}_throughput.fits'.format(

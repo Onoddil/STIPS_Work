@@ -399,7 +399,7 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
 
 
 if __name__ == '__main__':
-    filters = ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']  # 'r062'
+    filters = ['r062', 'z087', 'y106', 'w149', 'j129', 'h158', 'f184']  # 'r062'
     # psfs is a list of HDULists
     psfs = []
     reduced_psfs = []
