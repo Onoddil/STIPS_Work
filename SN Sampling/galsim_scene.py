@@ -14,6 +14,8 @@ import sncosmo
 import astropy.io.fits as pyfits
 import astropy.units as u
 
+np.set_printoptions(edgeitems=10, linewidth=500)
+
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
     # Function that creates a blank axis canvas; each figure gets a name (or alternatively a number
@@ -97,10 +99,6 @@ def main(argv):
         psfs.append(galsim.InterpolatedImage(galsim.Image(psf_.data),
                     scale=psf_.header['PIXELSCL']))
 
-    # Define the size of the postage stamp that we use for each individual galaxy within the larger
-    # image, and for the PSF images.
-    stamp_size = 100
-
     # We choose a particular (RA, dec) location on the sky for our observation.
     ra_targ = 90.*galsim.degrees
     dec_targ = -10.*galsim.degrees
@@ -120,9 +118,8 @@ def main(argv):
     bulge_n = 3.5          #
     bulge_re = 2.3         # arcsec
     disk_n = 1.5           #
-    disk_re = 3.7          # arcsec
-    bulge_frac = 0.3       #
-    gal_q = 0.73           # (axis ratio 0 < q < 1)
+    disk_re = 3            # arcsec
+    bulge_frac = 0         #
     pa_disk = 23           # degrees (position angle on the sky)
 
     filt_zp = np.array([26.39, 26.41, 27.50, 26.35, 26.41, 25.96])
@@ -139,11 +136,13 @@ def main(argv):
     # half-light radius can be uniformly drawn between two reasonable radii
     lr_low, lr_high = 0.3, 2.5
     half_l_r = np.random.uniform(lr_low, lr_high)
+    half_l_r = disk_re
     # L(< R) / Ltot = \gamma(2n, x) / \Gamma(2n); scipy.special.gammainc is lower incomplete over
     # regular gamma function. Thus gammaincinv is the inverse to gammainc, solving
     # L(< r) / Ltot = Y, where Y is a large fraction
     y_frac = 0.75
     x_ = gammaincinv(2*n_type, y_frac)
+    # TODO: fix these to solve for two-component integrals if those are the way forward
     # however, x = bn * (R/Re)**(1/n), so we have to solve for R now, approximating bn; in arcsec
     offset_r = (x_ / (2*n_type - 1/3))**n_type * half_l_r
     # redshift randomly drawn between two values uniformly
@@ -156,27 +155,19 @@ def main(argv):
     exptime = 100
 
     # total flux in galaxy -- ensure that all units end up in flux as counts/s accordingly
-    Sg = 10**(-1/2.5 * (mag - filt_zp[np.where(filters == 'f184')[0][0]]))
+    Sg = 10**(-1/2.5 * (mag - filt_zp[np.where(filters == 'f184')[0][0]])) * wfirst.gain * exptime
 
     # Define the galaxy profile.
-    # Normally Sersic profiles are specified by half-light radius, the radius that
-    # encloses half of the total flux.  However, for some purposes, it can be
-    # preferable to instead specify the scale radius, where the surface brightness
-    # drops to 1/e of the central peak value.
     bulge = galsim.Sersic(bulge_n, half_light_radius=bulge_re)
     disk = galsim.Sersic(disk_n, half_light_radius=disk_re)
     # Objects may be multiplied by a scalar (which means scaling the flux) and also
     # added to each other.
-    gal = (bulge_frac * bulge + (1-bulge_frac) * disk).withFlux(Sg)
+    gal = bulge_frac * bulge + (1-bulge_frac) * disk
     # Set the shape of the galaxy according to axis ratio and position angle
-    # Note: All angles in GalSim must have explicit units.  Options are:
-    #       galsim.radians
-    #       galsim.degrees
-    #       galsim.arcmin
-    #       galsim.arcsec
-    #       galsim.hours
-    gal_shape = galsim.Shear(q=gal_q, beta=pa_disk*galsim.degrees)
+    gal_shape = galsim.Shear(q=e_disk, beta=pa_disk*galsim.degrees)
     gal = gal.shear(gal_shape)
+
+    stamp_size = 2*2*np.ceil(max(disk_re, bulge_re) / wfirst.pixel_scale).astype(int)
 
     endflag = 0
     while endflag == 0:
@@ -200,6 +191,7 @@ def main(argv):
             endflag = 1
     rand_dx = rand_ra / wfirst.pixel_scale
     rand_dy = rand_dec / wfirst.pixel_scale
+    print(rand_dx, rand_dy, disk_re / wfirst.pixel_scale)
 
     gs = gridcreate('1', 2, 3, 0.8, 5)
     # Calculate the sky level for each filter, and draw the PSF and the galaxies through the
@@ -250,7 +242,7 @@ def main(argv):
 
         # Set up the full image that will contain all the individual galaxy images, with information
         # about WCS:
-        final_image = galsim.ImageF(stamp_size, stamp_size, wcs=wcs)
+        final_image = galsim.ImageD(stamp_size, stamp_size, wcs=wcs)
 
         # Drawing PSF.  Note that the PSF object intrinsically has a flat SED, so if we convolve it
         # with a galaxy, it will properly take on the SED of the galaxy.  For the sake of the demo,
@@ -268,7 +260,8 @@ def main(argv):
         # flux in this filter.
         star_sed = galsim.SED(lambda x: 1, 'nm', 'flambda').withFlux(1., filter_)
         star = galsim.Convolve(point*star_sed, psfs[i])
-        img_psf = galsim.ImageF(stamp_size, stamp_size)
+
+        img_psf = galsim.ImageD(stamp_size, stamp_size)
         star.drawImage(bandpass=filter_, image=img_psf, scale=wfirst.pixel_scale)
         ix = int(math.floor(stamp_size/2+rand_dx+0.5))
         iy = int(math.floor(stamp_size/2+rand_dy+0.5))
@@ -277,17 +270,17 @@ def main(argv):
         bounds = stamp_bounds & final_image.bounds
         final_image[bounds] += sn_flux * img_psf[bounds]
 
-        stamp = galsim.Convolve([psfs[i], gal])
+        stamp = galsim.Convolve(psfs[i], gal)
         dx_gal, dy_gal = np.random.uniform(-0.1, 0.1), np.random.uniform(-0.1, 0.1)
         # Account for the fractional part of the position:
         ix = int(math.floor(stamp_size/2+dx_gal+0.5))
         iy = int(math.floor(stamp_size/2+dy_gal+0.5))
-        img_gal = galsim.ImageF(stamp_size, stamp_size)
-        stamp.drawImage(image=img_gal, scale=wfirst.pixel_scale)  # bandpass=filter_,
+        img_gal = galsim.ImageD(stamp_size, stamp_size)
+        stamp.drawImage(image=img_gal, scale=wfirst.pixel_scale)
         stamp_bounds = galsim.BoundsI(ix-0.5*stamp_size, ix+0.5*stamp_size-1,
                                       iy-0.5*stamp_size, iy+0.5*stamp_size-1)
         bounds = stamp_bounds & final_image.bounds
-        final_image[bounds] += img_gal[bounds]
+        final_image[bounds] += Sg * img_gal[bounds]
 
         # First we get the amount of zodaical light for a position corresponding to the center of
         # this SCA.  The results are provided in units of e-/arcsec^2, using the default WFIRST
@@ -295,7 +288,8 @@ def main(argv):
         # >1 to account for the amount of stray light that is expected.  If we didn't provide a
         # date for the observation, then it will assume that it's the vernal equinox (sun at (0,0)
         # in ecliptic coordinates) in 2025.
-        sky_level = wfirst.getSkyLevel(wfirst_filters[filter_name], world_pos=SCA_cent_pos)
+        sky_level = wfirst.getSkyLevel(wfirst_filters[filter_name], world_pos=SCA_cent_pos,
+                                       exptime=exptime)
         sky_level *= (1.0 + wfirst.stray_light_fraction)
         # Make a image of the sky that takes into account the spatially variable pixel scale.  Note
         # that makeSkyImage() takes a bit of time.  If you do not care about the variable pixel
@@ -389,7 +383,7 @@ def main(argv):
         # expected to be approximately 1. Eventually, this may change when the camera is assembled,
         # and there may be a different value for each SCA. For now, there is just a single number,
         # which is equal to 1.
-        final_image /= (wfirst.gain * exptime)
+        final_image /= exptime
 
         # Finally, the analog-to-digital converter reads in an integer value.
         final_image.quantize()
@@ -399,12 +393,12 @@ def main(argv):
         # Since many people are used to viewing background-subtracted images, we provide a
         # version with the background subtracted (also rounding that to an int).
         sky_image.quantize()
-        tot_sky_image = (sky_image + round(dark_current))/wfirst.gain
+        tot_sky_image = (sky_image + round(dark_current)) / exptime
         tot_sky_image.quantize()
         final_image -= tot_sky_image
 
         ax = plt.subplot(gs[i])
-        norm = simple_norm(final_image.array, 'log', percent=100)
+        norm = simple_norm(final_image.array, 'linear', percent=100)
         img = ax.imshow(final_image.array, cmap='viridis', norm=norm, origin='lower')
         cb = plt.colorbar(img, ax=ax, use_gridspec=True)
         cb.set_label(r'Flux / e$^-\,\mathrm{s}^{-1}$')

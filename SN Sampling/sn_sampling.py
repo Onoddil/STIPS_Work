@@ -11,11 +11,55 @@ from scipy.special import gammaincinv
 from astropy.table import Table
 import sncosmo
 import astropy.units as u
-import timeit
 from scipy.ndimage import shift
 import glob
 
 import psf_mog_fitting as pmf
+
+try:
+    dummy = profile
+except:
+    profile = lambda x: x
+np.set_printoptions(edgeitems=10, linewidth=500)
+import galsim.wfirst as wfirst
+
+# things to add to detector to create accurate noise model:
+# sources, counting as poissonian noise
+# dark
+# read
+# background (zodiacal light)
+# thermal background
+# reciprocity failure
+# non-linearity
+# interpixel capacitance
+# persistence
+# charge diffusion
+
+# nonlinearity_beta - The coefficient of the (counts)^2 term in the detector nonlinearity
+# function.  This will not ordinarily be accessed directly by users; instead, it will be accessed
+# by the convenience function in this module that defines the nonlinearity function as
+# counts_out = counts_in + beta*counts_in^2.
+
+# reciprocity_alpha - The normalization factor that determines the effect of reciprocity failure
+# of the detectors for a given exposure time. - use the algorithm galsim uses, in which
+# pR/p = ((p/t)/(p'/t'))^(alpha/log(10)). p'/t' is the flux for which the relation holds - with
+# wfirst using base_flux = 1.0, p is response in electrons, t is time; pR is the response if the
+# relation fails to hold
+
+# thermal background currently 0.023 e/pix/s except F184 which is 0.179 e/pix/s - add catch for
+# R062 and default it to z087 otherwise
+
+# ipc_kernel - The 3x3 kernel to be used in simulations of interpixel capacitance (IPC), using
+# galsim.wfirst.applyIPC().
+
+# persistence_coefficients - The retention fraction of the previous eight exposures in a simple,
+# linear model for persistence.
+
+# charge_diffusion - The per-axis sigma to use for a Gaussian representing charge diffusion for
+# WFIRST.  Units: pixels.
+
+# read noise goes as sqrt(sig_floor**2 + 12 * sig_RN**2 * (N-1) / (N+1) / N) where
+# N = t_exp / t_read; if N=100 we get read noise of ~8.5 e- for a floor of 5 e- single RN of 20 e-.
 
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
@@ -57,7 +101,7 @@ def gaussian_2d(x, x_t, mu, mu_t, sigma):
     return gauss_pdf
 
 
-# flat and dark can be loaded from the stips fits file or found elsewhere, they are simply input
+# flat and dark can be loaded from a fits file or found elsewhere, they are simply input
 # files to be multipled/added to the original data.
 def add_dark(image, dark_current):
     image += dark_current
@@ -247,7 +291,7 @@ def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
 
 
 def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp_filename,
-                dark_current, flat_img, readnoise, t0, lambda_eff):
+                dark_current, readnoise, t0, lambda_eff):
     nfilts = len(filters)
     ntimes = len(times)
 
@@ -341,6 +385,8 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     zod_flux *= pixel_scale**2  # erg/cm^2/s/Hz[/pixel]
     zod_mag = -2.5 * np.log10(zod_flux) - 48.6  # AB mag system
     zod_count = 10**(-1/2.5 * (zod_mag - filt_zp[0]))
+    # correct the zodiacal light counts for the stray light fraction of the telescope
+    zod_count *= (1.0 + wfirst.stray_light_fraction)
     gal_params = [mu_0, n_type, e_disk, pa_disk, half_l_r, offset_r, Vgm_unit, mag]
     # currently assuming a simple half-pixel dither; TODO: check if this is right and update
     second_gal_offets = np.empty((nfilts, 2), float)
@@ -359,7 +405,6 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
         image = add_dark(image, dark_current)
         image = set_exptime(image, exptime)
         image = add_poisson(image)
-        image = mult_flat(image, flat_img)
         image = add_read(image, readnoise)
 
         # second_gal_offset is the pixel offset, relative to the central pixel, of the observation,
@@ -400,7 +445,6 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
             image = add_dark(image, dark_current)
             image = set_exptime(image, exptime)
             image = add_poisson(image)
-            image = mult_flat(image, flat_img)
             image = add_read(image, readnoise)
 
             images.append(image)
@@ -454,7 +498,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
 
 @profile
 def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr, sn_priors,
-           filt_zp):
+           filt_zp, make_fit_figs):
     x2s = np.empty(len(sn_types), float)
     bestfit_models = []
     bestfit_results = []
@@ -463,7 +507,6 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
     z_array = np.arange(0, largest_z+1e-10, dz)
     min_counts = 0.0001
 
-    s = 0
     for i, sn_type in enumerate(sn_types):
         params = ['t0']
         if sn_type == 'Ia':
@@ -511,27 +554,25 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         if sn_type == 'Ia':
             bounds.update({'x1': (-2.75, 3.55), 'c': (-0.39, 0.31)})
 
-        s_ = timeit.default_timer()
-        # result = None
-        # fitted_model = None
-        # for z_init in np.linspace(z_min, z_max, 15):
-        #     sn_model.set(z=z_init)
-        #     result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
-        #                                                     bounds=bounds, minsnr=minsnr,
-        #                                                     guess_z=False)
-        #     if result is None or result_temp.chisq < result.chisq:
-        #         result = result_temp
-        #         fitted_model = fitted_model_temp
+        result = None
+        fitted_model = None
+        for z_init in np.linspace(z_min, z_max, 10):
+            sn_model.set(z=z_init)
+            result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
+                                                            bounds=bounds, minsnr=minsnr,
+                                                            guess_z=False)
+            if result is None or result_temp.chisq < result.chisq:
+                result = result_temp
+                fitted_model = fitted_model_temp
 
         # after a round of minimising the lightcurve at fixed redshifts, add redshift to allow a
         # final fit of the model to the data
         bounds.update({'z': (z_min, z_max)})
         params += ['z']
-        fitted_model = sn_model
+        # fitted_model = sn_model
+        guess_z = True if fitted_model is sn_model else False
         result, fitted_model = sncosmo.fit_lc(lc_data, fitted_model, params, bounds=bounds,
-                                              minsnr=minsnr)  # , guess_z=False)
-
-        s += timeit.default_timer()-s_
+                                              minsnr=minsnr, guess_z=guess_z)
 
         bestfit_models.append(fitted_model)
         bestfit_results.append(result)
@@ -541,7 +582,7 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
             x2s[i] = sncosmo.chisq(lc_data, fitted_model)
     # add a fire extinguisher null hypothesis probability
     probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-5)
-    print('{:.2f}'.format(s), x2s, probs)
+    print(x2s, probs)
     probs /= np.sum(probs)
     best_ind = np.argmax(probs[:-1])
     best_r = bestfit_results[best_ind]
@@ -552,60 +593,70 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
     else:
         fit_type = sn_types[best_ind]
 
-    figtext = [figtext[0], figtext[1] + '\n' + r'$\chi^2_{{\nu={}}}$ = {:.3f}'.format(best_r.ndof,
-               best_x2/best_r.ndof)]
-    errors = best_r.errors
-    model_params = best_m.parameters
-    if sn_types[best_ind] == 'Ia':
-        z_format = sncosmo.utils.format_value(model_params[0], errors.get('z'), latex=True)
-        t0_format = sncosmo.utils.format_value(model_params[1], errors.get('t0'), latex=True)
-        x0_format = sncosmo.utils.format_value(model_params[2], errors.get('x0'), latex=True)
-        x1_format = sncosmo.utils.format_value(model_params[3], errors.get('x1'), latex=True)
-        c_format = sncosmo.utils.format_value(model_params[4], errors.get('c'), latex=True)
-        figtext.append('Type {}: $z = {}$\n$t_0 = {}$\n$x_0 = {}$'.format(sn_types[best_ind],
-                       z_format, t0_format, x0_format))
-        if probs[0] > 0:
-            p_sig = int(np.floor(np.log10(abs(probs[0]))))
+    if make_fit_figs:
+        figtext = [figtext[0], figtext[1] + '\n' + r'$\chi^2_{{\nu={}}}$ = {:.3f}'.format(
+                   best_r.ndof, best_x2/best_r.ndof)]
+        errors = best_r.errors
+        model_params = best_m.parameters
+        if sn_types[best_ind] == 'Ia':
+            z_format = sncosmo.utils.format_value(model_params[0], errors.get('z'), latex=True)
+            t0_format = sncosmo.utils.format_value(model_params[1], errors.get('t0'), latex=True)
+            x0_format = sncosmo.utils.format_value(model_params[2], errors.get('x0'), latex=True)
+            x1_format = sncosmo.utils.format_value(model_params[3], errors.get('x1'), latex=True)
+            c_format = sncosmo.utils.format_value(model_params[4], errors.get('c'), latex=True)
+            figtext.append('Type {}: $z = {}$\n$t_0 = {}$\n$x_0 = {}$'.format(sn_types[best_ind],
+                           z_format, t0_format, x0_format))
+            if probs[0] > 0:
+                p_sig = int(np.floor(np.log10(abs(probs[0]))))
+            else:
+                p_sig = 0
+            if p_sig > 3:
+                figtext.append('$x_1 = {}$\n$c = {}$\n$P(Ia|D) = {:.3f} \\times 10^{}$'.format(
+                               x1_format, c_format, probs[0]/10**p_sig, p_sig))
+            else:
+                figtext.append('$x_1 = {}$\n$c = {}$\n$P(Ia|D) = {:.3f}$'.format(x1_format,
+                               c_format, probs[0]))
         else:
-            p_sig = 0
-        if p_sig > 3:
-            figtext.append('$x_1 = {}$\n$c = {}$\n$P(Ia|D) = {:.3f} \\times 10^{}$'.format(
-                           x1_format, c_format, probs[0]/10**p_sig, p_sig))
-        else:
-            figtext.append('$x_1 = {}$\n$c = {}$\n$P(Ia|D) = {:.3f}$'.format(x1_format, c_format,
-                           probs[0]))
-    else:
-        z_format = sncosmo.utils.format_value(model_params[0], errors.get('z'), latex=True)
-        t0_format = sncosmo.utils.format_value(model_params[1], errors.get('t0'), latex=True)
-        A_format = sncosmo.utils.format_value(model_params[2], errors.get('amplitude'), latex=True)
-        figtext.append('Type {}: $z = {}$\n$t_0 = {}$'.format(sn_types[best_ind],
-                       z_format, t0_format))
-        if probs[0] > 0:
-            p_sig = int(np.floor(np.log10(abs(probs[0]))))
-        else:
-            p_sig = 0
-        if p_sig > 3:
-            figtext.append('$A = {}$\n$P(Ia|D) = {:.3f} \\times 10^{{{}}}$'.format(A_format, probs[0]/10**p_sig, p_sig))
-        else:
-            figtext.append('$A = {}$\n$P(Ia|D) = {:.3f}$'.format(A_format, probs[0]))
+            z_format = sncosmo.utils.format_value(model_params[0], errors.get('z'), latex=True)
+            t0_format = sncosmo.utils.format_value(model_params[1], errors.get('t0'), latex=True)
+            A_format = sncosmo.utils.format_value(model_params[2], errors.get('amplitude'),
+                                                  latex=True)
+            figtext.append('Type {}: $z = {}$\n$t_0 = {}$'.format(sn_types[best_ind],
+                           z_format, t0_format))
+            if probs[0] > 0:
+                p_sig = int(np.floor(np.log10(abs(probs[0]))))
+            else:
+                p_sig = 0
+            if p_sig > 3:
+                figtext.append('$A = {}$\n$P(Ia|D) = {:.3f} \\times 10^{{{}}}$'.format(
+                    A_format, probs[0]/10**p_sig, p_sig))
+            else:
+                figtext.append('$A = {}$\n$P(Ia|D) = {:.3f}$'.format(A_format, probs[0]))
 
-    fig = sncosmo.plot_lc(lc_data, model=bestfit_models, xfigsize=5*ncol, tighten_ylim=False,
-                          ncol=ncol, figtext=figtext, figtextsize=2, model_label=sn_types)
-    fig.tight_layout(rect=[0, 0.03, 1, 0.935])
-    fig.savefig('{}/fit_{}.pdf'.format(directory, counter))
+        ypad = 4 if sn_types[best_ind] == 'Ia' else 2
+        fig = sncosmo.plot_lc(lc_data, model=bestfit_models, xfigsize=5*ncol, tighten_ylim=False,
+                              ncol=ncol, figtext=figtext, figtextsize=ypad, model_label=sn_types)
+        fig.tight_layout(rect=[0, 0.03, 1, 0.935])
+        fig.savefig('{}/fit_{}.pdf'.format(directory, counter))
 
     return probs[0], fit_type
 
 
 @profile
-def run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime, filt_zp, psf_comp_filename, dark_current, flat_img, readnoise, t0, lambda_eff):
+def run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime, filt_zp,
+                           psf_comp_filename, dark_current, readnoise, t0, lambda_eff,
+                           make_sky_figs, make_fit_figs, make_flux_figs):
     probs, true_types, fit_types = [], [], []
     i = 0
     while i < ngals:
         type_ind = np.random.choice(len(sn_types))
         images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux = \
             make_images(filters, pixel_scale, sn_types[type_ind], times, exptime, filt_zp,
-                        psf_comp_filename, dark_current, flat_img, readnoise, t0, lambda_eff)
+                        psf_comp_filename, dark_current, readnoise, t0, lambda_eff)
+
+        if make_sky_figs:
+            make_figures(images_with_sn, images_without_sn, diff_images, filters, times, i+1,
+                         exptime)
 
         lc_data_table = Table(data=lc_data,
                               names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
@@ -628,21 +679,22 @@ def run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime, filt_
             figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
 
         prob, fit_type = fit_lc(lc_data_table, sn_types, directory, filters, i+1, figtext, ncol,
-                                minsnr, sn_priors, filt_zp)
+                                minsnr, sn_priors, filt_zp, make_fit_figs)
 
-        gs = gridcreate('09', 1, 1, 0.8, 5)
-        ax = plt.subplot(gs[0])
-        for c, filter_ in zip(colours, filters):
-            q = lc_data_table['band'] == filter_
-            ax.errorbar(lc_data_table['time'][q], (lc_data_table['flux'][q] - true_flux[q]) /
-                        true_flux[q], yerr=lc_data_table['fluxerr'][q]/true_flux[q],
-                        fmt='{}.'.format(c), label=filter_)
-        ax.legend(shadow=False, framealpha=0)
-        ax.axhline(0, c='k', ls='--')
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Flux difference (fit - true)/true')
-        plt.tight_layout()
-        plt.savefig('{}/flux_ratio_{}.pdf'.format(directory, i+1))
+        if make_flux_figs:
+            gs = gridcreate('09', 1, 1, 0.8, 5)
+            ax = plt.subplot(gs[0])
+            for c, filter_ in zip(colours, filters):
+                q = lc_data_table['band'] == filter_
+                ax.errorbar(lc_data_table['time'][q], (lc_data_table['flux'][q] - true_flux[q]) /
+                            true_flux[q], yerr=lc_data_table['fluxerr'][q]/true_flux[q],
+                            fmt='{}.'.format(c), label=filter_)
+            ax.legend(shadow=False, framealpha=0)
+            ax.axhline(0, c='k', ls='--')
+            ax.set_xlabel('Time')
+            ax.set_ylabel('Flux difference (fit - true)/true')
+            plt.tight_layout()
+            plt.savefig('{}/flux_ratio_{}.pdf'.format(directory, i+1))
 
         # if the original SN is a Ia, then prob will be a "goodness of Ia-ness", but if the SN is
         # a CC (Ib/Ic/II) then the probability will be a "badness of CC-ness"; if we're fitting a
@@ -664,6 +716,39 @@ def run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime, filt_
     return goodness_of_ia, badness_of_cc, fp_rate, fn_rate
 
 
+def make_figures(images_with_sn, images_without_sn, diff_images, filters, times, i, exptime):
+    n = np.random.choice(len(times))
+    t = times[n]
+    iws = images_with_sn[n]
+    ds = diff_images[n]
+    gs = gridcreate('1', 3, len(filters), 0.8, 5)
+    for j, (iw, iwo, d, f) in enumerate(zip(iws, images_without_sn, ds, filters)):
+        ax = plt.subplot(gs[0, j])
+        norm = simple_norm(iw / exptime, 'linear', percent=100)
+        img = ax.imshow(iw / exptime, cmap='viridis', norm=norm, origin='lower')
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label(r'Flux / e$^-\,\mathrm{s}^{-1}$')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel, {}, t = {:.0f}'.format(f, t))
+        ax = plt.subplot(gs[1, j])
+        norm = simple_norm(iwo / exptime, 'linear', percent=100)
+        img = ax.imshow(iwo / exptime, cmap='viridis', norm=norm, origin='lower')
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label(r'Flux / e$^-\,\mathrm{s}^{-1}$')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+        ax = plt.subplot(gs[2, j])
+        norm = simple_norm(d / exptime, 'linear', percent=100)
+        img = ax.imshow(d / exptime, cmap='viridis', norm=norm, origin='lower')
+        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+        cb.set_label(r'Flux / e$^-\,\mathrm{s}^{-1}$')
+        ax.set_xlabel('x / pixel')
+        ax.set_ylabel('y / pixel')
+    plt.tight_layout()
+    plt.savefig('out_gals/images_{}.pdf'.format(i))
+    plt.close()
+
+
 if __name__ == '__main__':
     ngals = 10
     # run_mins = 20/60
@@ -671,7 +756,6 @@ if __name__ == '__main__':
 
     # sys.exit()
 
-    pixel_scale = 0.11  # arcsecond/pixel
     directory = 'out_gals'
 
     filters_master = np.array(['z087', 'y106', 'w149', 'j129', 'h158', 'f184'])  # 'r062'
@@ -707,7 +791,7 @@ if __name__ == '__main__':
     exptime = 1000  # seconds
     sn_types = ['Ia', 'Ib', 'Ic', 'II']
 
-    t_low, t_high, t_interval = -5, 35, 30
+    t_low, t_high, t_interval = -5, 35, 20
     times = np.arange(t_low, t_high+1e-10, t_interval)
 
     psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
@@ -718,14 +802,12 @@ if __name__ == '__main__':
     #                     'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst', max_pix_offsets, cuts)
     # sys.exit()
 
-    # see https://wfirst.ipac.caltech.edu/sims/Param_db.html for details of parameters;
-    # dark current is in counts/s/pixel, so requires correcting by the exposure time
-    dark_current = 0.015
-    # TODO: check this is a good flat field array and update if necessary
-    f = pyfits.open('../err_flat_wfi.fits')
-    flat_img = f[1].data
-    # worst case requirement readout noise
-    readnoise = 20
+    # dark current and read noise from the GalSim instrument; read noise is in pure e-, but
+    # the current is e-/pixel/s, so requires correcting by exposure time
+    readnoise = wfirst.read_noise
+    dark_current = wfirst.dark_current
+    pixel_scale = wfirst.pixel_scale  # arcsecond/pixel
+
     t0 = 50000
     minsnr = 5
 
@@ -758,8 +840,13 @@ if __name__ == '__main__':
         os.system('rm {}/fit_*.pdf'.format(directory))
     if len(glob.glob('{}/flux_*.pdf'.format(directory))) > 0:
         os.system('rm {}/flux_*.pdf'.format(directory))
+    if len(glob.glob('{}/images_*.pdf'.format(directory))) > 0:
+        os.system('rm {}/images_*.pdf'.format(directory))
+
+    make_sky_figs, make_fit_figs, make_flux_figs = False, True, False
 
     g_ia, b_cc, fp, fn = run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime,
-                                                filt_zp, psf_comp_filename, dark_current, flat_img,
-                                                readnoise, t0, lambda_eff)
+                                                filt_zp, psf_comp_filename, dark_current,
+                                                readnoise, t0, lambda_eff, make_sky_figs,
+                                                make_fit_figs, make_flux_figs)
     print(g_ia, b_cc, fp, fn)
