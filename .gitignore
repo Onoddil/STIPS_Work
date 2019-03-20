@@ -16,3 +16,5 @@
 */*.lprof
 */._*
 */*.so*
+*.pyc
+__pycache__/*
