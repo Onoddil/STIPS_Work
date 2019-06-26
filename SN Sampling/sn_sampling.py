@@ -376,6 +376,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     zp_array = []
     zpsys_array = []
 
+    # TODO: see if we can replace this with the galsim.wfirst version
     # given some zodiacal light flux, in ergcm^-2s^-1A^-1arcsec^-2, flip given the ST ZP,
     # then convert back to flux;
     # see http://www.stsci.edu/hst/wfc3/documents/handbooks/currentIHB/c09_exposuretime08.html
@@ -388,7 +389,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     # correct the zodiacal light counts for the stray light fraction of the telescope
     zod_count *= (1.0 + wfirst.stray_light_fraction)
     gal_params = [mu_0, n_type, e_disk, pa_disk, half_l_r, offset_r, Vgm_unit, mag]
-    # currently assuming a simple half-pixel dither; TODO: check if this is right and update
+    # TODO: check if simple half-pixel dither is right and update if not
     second_gal_offets = np.empty((nfilts, 2), float)
     for j in range(0, nfilts):
         # define a random pixel offset ra/dec
@@ -580,7 +581,7 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
             x2s[i] = result.chisq
         except AttributeError:
             x2s[i] = sncosmo.chisq(lc_data, fitted_model)
-    # add a fire extinguisher null hypothesis probability
+    # TODO: add a fire extinguisher null hypothesis probability
     probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-5)
     print(x2s, probs)
     probs /= np.sum(probs)
@@ -764,7 +765,7 @@ if __name__ == '__main__':
     # by ~0.03 mags - full microsit ZPs are
     # [26.39 r062] 26.39 26.42 [27.50 w149 mask, 27.61 no mask w149] [25.59 k208] 26.30 25.96
     filt_zp_master = np.array([26.39, 26.41, 27.50, 26.35, 26.41, 25.96])
-    lambda_eff_master = np.array([0.862, 1.045, 1.251, 1.274, 1.555, 1.830])  # 0.601
+    lambda_eff_master = np.array([0.601, 0.862, 1.045, 1.251, 1.274, 1.555, 1.830])
     for j in range(0, len(filters_master)):
         f = pyfits.open('../../webbpsf-data/WFI/filters/{}_throughput.fits'.format(
                         filters_master[j].upper()))
@@ -787,7 +788,7 @@ if __name__ == '__main__':
                                     wave_unit=u.micron, name=filters_master[j])
         sncosmo.register(bandpass)
     # default exptime assumes ~4 filter pointings in an hour, which is a zeroth order guess at the
-    # pbserving plan for WFIRST at present
+    # observing plan for WFIRST at present
     exptime = 1000  # seconds
     sn_types = ['Ia', 'Ib', 'Ic', 'II']
 
@@ -799,7 +800,7 @@ if __name__ == '__main__':
     oversampling, N_comp, max_pix_offsets, cuts = 4, 20, [9, 9, 9, 10, 11, 11], [0.0009, 0.0009, 0.0009, 0.0008, 0.0008, 0.0007]
 
     # pmf.psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
-    #                     'wfc3' if 'wfc3' in psf_comp_filename else 'wfirst', max_pix_offsets, cuts)
+    #                     'wfirst', max_pix_offsets, cuts)
     # sys.exit()
 
     # dark current and read noise from the GalSim instrument; read noise is in pure e-, but
