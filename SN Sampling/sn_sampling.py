@@ -16,6 +16,8 @@ import glob
 
 import psf_mog_fitting as pmf
 
+import timeit
+
 try:
     dummy = profile
 except:
@@ -265,7 +267,7 @@ def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
     # source list...
 
     if sn_type == 'Ia':
-        sn_model = sncosmo.Model('salt2-h17')
+        sn_model = sncosmo.Model('salt2-extended-h17')
         if setflag:
             x1, c = np.random.normal(0.4, 0.9), np.random.normal(-0.04, 0.1)
             sn_model.set(t0=t0, z=z, x1=x1, c=c)
@@ -282,7 +284,7 @@ def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
         if setflag:
             sn_model.set(t0=t0, z=z)
     elif sn_type == 'IIL':
-        sn_model = sncosmo.Model('nugent-sn21')
+        sn_model = sncosmo.Model('nugent-sn2l')
         if setflag:
             sn_model.set(t0=t0, z=z)
     # TODO: add galaxy dust via smcosmo.F99Dust([r_v])
@@ -497,24 +499,91 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     return images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux
 
 
+def make_fluxes(filters, sn_type, times, filt_zp, t0):
+    nfilts = len(filters)
+    ntimes = len(times)
+
+    # redshift randomly drawn between two values uniformly
+    z_low, z_high = 0.2, 1.0
+    z = np.random.uniform(z_low, z_high)
+
+    sn_model = get_sn_model(sn_type, 1, t0=t0, z=z)
+    # pretending that F125W on WFC3/IR is 2MASS J, we set the absolute magnitude of a
+    # type Ia supernova to J = -19.0 (meikle 2000). Phillips (1993) also says that ~M_I = -19 --
+    # currently just setting absolute magnitudes to -19, but could change if needed
+    sn_model.set_source_peakabsmag(-19.0, 'f125w', 'ab')
+
+    # things that are needed to create the astropy.table.Table for use in fit_lc:
+    # time, band (name, see registered bandpasses), flux, fluxerr [both just derived from an
+    # image somehow], zp, zpsys [zeropoint and name of system]
+
+    time_array = []
+    band_array = []
+    flux_array = []
+    fluxerr_array = []
+    zp_array = []
+    zpsys_array = []
+
+    true_flux = []
+    for k in range(0, ntimes):
+        for j in range(0, nfilts):
+            # TODO: add exposure and readout time so that exposures are staggered in time
+            time = times[k] + t0
+
+            # get the apparent magnitude of the supernova at a given time; first get the
+            # appropriate filter for the observation
+            bandpass = sncosmo.get_bandpass(filters[j])
+            # time should be in days
+            m_ia = sn_model.bandmag(bandpass, magsys='ab', time=time)
+            if np.isnan(m_ia):
+                m_ia = -2.5 * np.log10(0.01) + filt_zp[j]
+
+            t_f = 10**(-1/2.5 * (m_ia - filt_zp[j]))
+
+            # noise floor of, say, 0.5% photometry in quadrature with shot noise
+            flux_err = np.sqrt(np.sqrt(t_f)**2 + (0.005 * t_f)**2)
+            flux = np.random.normal(loc=t_f, scale=flux_err)
+            time_array.append(time)
+            band_array.append(filters[j])
+            flux_array.append(flux)
+            fluxerr_array.append(flux_err)
+            zp_array.append(filt_zp[j])  # filter-specific zeropoint
+            zpsys_array.append('ab')
+
+            true_flux.append(t_f)
+
+    lc_data = [np.array(time_array), np.array(band_array), np.array(flux_array),
+               np.array(fluxerr_array), np.array(zp_array), np.array(zpsys_array)]
+    true_flux = np.array(true_flux)
+
+    param_names = ['z', 't0']
+    if sn_type == 'Ia':
+        param_names += ['x0', 'x1', 'c']
+    else:
+        param_names += ['amplitude']
+    sn_params = [sn_model[q] for q in param_names]
+
+    return lc_data, sn_params, true_flux
+
+
 @profile
 def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr, sn_priors,
-           filt_zp, make_fit_figs):
+           filt_zp, make_fit_figs, multi_z_fit, type_ind):
     x2s = np.empty(len(sn_types), float)
     bestfit_models = []
     bestfit_results = []
     largest_z = 2.5
     dz = 0.01
-    z_array = np.arange(0, largest_z+1e-10, dz)
     min_counts = 0.0001
 
     for i, sn_type in enumerate(sn_types):
-        params = ['t0']
+        params = ['t0', 'z']
         if sn_type == 'Ia':
             params += ['x0', 'x1', 'c']
         else:
             params += ['amplitude']
         sn_model = get_sn_model(sn_type, 0)
+
         # place upper limits on the redshift probeable, by finding the z at which each filter drops
         # out of being in overlap with the model
         z_upper_band = np.empty(len(filters), float)
@@ -535,6 +604,7 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         # this filter, we set the redshift range to its maximum to remove the filter from
         # consideration.
         for p in range(0, len(filters)):
+            z_array = np.arange(0, z_upper_band[p]+1e-10, dz)
             snr_filt = lc_data['flux'].data[p] / lc_data['fluxerr'].data[p]
             if snr_filt < minsnr:
                 z_upper_count[p] = z_array[-1]
@@ -555,35 +625,35 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         if sn_type == 'Ia':
             bounds.update({'x1': (-2.75, 3.55), 'c': (-0.39, 0.31)})
 
-        result = None
-        fitted_model = None
-        for z_init in np.linspace(z_min, z_max, 10):
-            sn_model.set(z=z_init)
-            result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
-                                                            bounds=bounds, minsnr=minsnr,
-                                                            guess_z=False)
-            if result is None or result_temp.chisq < result.chisq:
-                result = result_temp
-                fitted_model = fitted_model_temp
+        if multi_z_fit:
+            result = None
+            fitted_model = None
+            for z_init in np.linspace(z_min, z_max, 10):
+                sn_model.set(z=z_init)
+                result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
+                                                                bounds=bounds, minsnr=minsnr,
+                                                                guess_z=False)
+                if result is None or result_temp.chisq < result.chisq:
+                    result = result_temp
+                    fitted_model = fitted_model_temp
+        else:
+            fitted_model = sn_model
 
         # after a round of minimising the lightcurve at fixed redshifts, add redshift to allow a
         # final fit of the model to the data
         bounds.update({'z': (z_min, z_max)})
-        params += ['z']
-        # fitted_model = sn_model
         guess_z = True if fitted_model is sn_model else False
         result, fitted_model = sncosmo.fit_lc(lc_data, fitted_model, params, bounds=bounds,
                                               minsnr=minsnr, guess_z=guess_z)
-
         bestfit_models.append(fitted_model)
         bestfit_results.append(result)
         try:
             x2s[i] = result.chisq
         except AttributeError:
             x2s[i] = sncosmo.chisq(lc_data, fitted_model)
-    # TODO: add a fire extinguisher null hypothesis probability
+
+    # TODO: add a fire extinguisher null hypothesis probability properly
     probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-5)
-    print(x2s, probs)
     probs /= np.sum(probs)
     best_ind = np.argmax(probs[:-1])
     best_r = bestfit_results[best_ind]
@@ -593,6 +663,8 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         fit_type = 'None'
     else:
         fit_type = sn_types[best_ind]
+    like_fit_type = 'None' if np.argmin(np.append(x2s, 10)) == len(x2s) else sn_types[np.argmin(np.append(x2s, 10))]
+    print(x2s / (len(lc_data['flux']) - len(sn_model.param_names)), probs, sn_types[type_ind], fit_type, like_fit_type)
 
     if make_fit_figs:
         figtext = [figtext[0], figtext[1] + '\n' + r'$\chi^2_{{\nu={}}}$ = {:.3f}'.format(
@@ -646,16 +718,21 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
 @profile
 def run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime, filt_zp,
                            psf_comp_filename, dark_current, readnoise, t0, lambda_eff,
-                           make_sky_figs, make_fit_figs, make_flux_figs):
+                           make_sky_figs, make_fit_figs, make_flux_figs, image_flag, ngals,
+                           multi_z_fit):
     probs, true_types, fit_types = [], [], []
     i = 0
     while i < ngals:
         type_ind = np.random.choice(len(sn_types))
-        images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux = \
-            make_images(filters, pixel_scale, sn_types[type_ind], times, exptime, filt_zp,
-                        psf_comp_filename, dark_current, readnoise, t0, lambda_eff)
+        if image_flag:
+            images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux = \
+                make_images(filters, pixel_scale, sn_types[type_ind], times, exptime, filt_zp,
+                            psf_comp_filename, dark_current, readnoise, t0, lambda_eff)
+        else:
+            lc_data, sn_params, true_flux = make_fluxes(filters, sn_types[type_ind], times,
+                                                        filt_zp, t0)
 
-        if make_sky_figs:
+        if make_sky_figs and image_flag:
             make_figures(images_with_sn, images_without_sn, diff_images, filters, times, i+1,
                          exptime)
 
@@ -680,7 +757,7 @@ def run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime, filt_
             figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
 
         prob, fit_type = fit_lc(lc_data_table, sn_types, directory, filters, i+1, figtext, ncol,
-                                minsnr, sn_priors, filt_zp, make_fit_figs)
+                                minsnr, sn_priors, filt_zp, make_fit_figs, multi_z_fit, type_ind)
 
         if make_flux_figs:
             gs = gridcreate('09', 1, 1, 0.8, 5)
@@ -844,10 +921,14 @@ if __name__ == '__main__':
     if len(glob.glob('{}/images_*.pdf'.format(directory))) > 0:
         os.system('rm {}/images_*.pdf'.format(directory))
 
-    make_sky_figs, make_fit_figs, make_flux_figs = False, True, False
+    make_sky_figs, make_fit_figs, make_flux_figs, image_flag = False, False, False, False
+    multi_z_fit = False
 
+    start = timeit.default_timer()
     g_ia, b_cc, fp, fn = run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime,
                                                 filt_zp, psf_comp_filename, dark_current,
                                                 readnoise, t0, lambda_eff, make_sky_figs,
-                                                make_fit_figs, make_flux_figs)
-    print(g_ia, b_cc, fp, fn)
+                                                make_fit_figs, make_flux_figs, image_flag, ngals,
+                                                multi_z_fit)
+    time = '{:.0f}s'.format(timeit.default_timer()-start)
+    print(g_ia, b_cc, fp, fn, time)
