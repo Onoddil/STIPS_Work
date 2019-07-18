@@ -17,12 +17,13 @@ import glob
 import psf_mog_fitting as pmf
 
 import timeit
+import copy
 
 try:
     dummy = profile
 except:
     profile = lambda x: x
-np.set_printoptions(edgeitems=10, linewidth=500)
+np.set_printoptions(edgeitems=10, linewidth=500, precision=4, floatmode='maxprec')
 import galsim.wfirst as wfirst
 
 # things to add to detector to create accurate noise model:
@@ -72,6 +73,21 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     plt.figure(name, figsize=(z*x, z*ratio*y))
     gs = gridspec.GridSpec(y, x, **kwargs)
     return gs
+
+
+def faintest_sn(sn_types, filters, filt_minmags):
+    for sn_type in sn_types:
+        sn_model = get_sn_model(sn_type, 1)
+        for filt, filt_minmag in zip(filters, filt_minmags):
+            z = 0
+            sn_model.set(z=z)
+            while sn_model.bandoverlap(filt) and sn_model.bandmag(filt, 'ab', sn_model.source.peakphase(filt)) < filt_minmag:
+                sn_model.set(z=z)
+                z += 0.01
+            if sn_model.bandoverlap(filt):
+                print(sn_type, filt, 'z={:.2f}'.format(z), 'mag loss')
+            else:
+                print(sn_type, filt, 'z={:.2f}'.format(z), 'wavelength loss')
 
 
 def model_number(run_minutes, n_runs):
@@ -499,7 +515,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     return images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux
 
 
-def make_fluxes(filters, sn_type, times, filt_zp, t0):
+def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, bkg, psf_r):
     nfilts = len(filters)
     ntimes = len(times)
 
@@ -540,9 +556,14 @@ def make_fluxes(filters, sn_type, times, filt_zp, t0):
 
             t_f = 10**(-1/2.5 * (m_ia - filt_zp[j]))
 
-            # noise floor of, say, 0.5% photometry in quadrature with shot noise
-            flux_err = np.sqrt(np.sqrt(t_f)**2 + (0.005 * t_f)**2)
+            # noise floor of, say, 0.5% photometry in quadrature with shot noise and background
+            # counts in e/s/pixel, assuming a WFIRST aperture size of psf_r pix, or ~pi r^2 pixels,
+            # remembering to correct for the fact that uncertainties in fluxes are really done in
+            # photon counts, so multiply then divide by exptime
+            flux_err = np.sqrt(np.sqrt(t_f * exptime)**2 + (0.005 * t_f * exptime)**2 +
+                               np.sqrt(bkg * exptime * np.pi * psf_r**2)**2) / exptime
             flux = np.random.normal(loc=t_f, scale=flux_err)
+            print(t_f, flux, flux_err, m_ia, filt_zp[j])
             time_array.append(time)
             band_array.append(filters[j])
             flux_array.append(flux)
@@ -561,23 +582,25 @@ def make_fluxes(filters, sn_type, times, filt_zp, t0):
         param_names += ['x0', 'x1', 'c']
     else:
         param_names += ['amplitude']
-    sn_params = [sn_model[q] for q in param_names]
+    sn_params = np.array([sn_model[q] for q in param_names])
 
     return lc_data, sn_params, true_flux
 
 
 @profile
 def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr, sn_priors,
-           filt_zp, make_fit_figs, multi_z_fit, type_ind):
+           filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params):
     x2s = np.empty(len(sn_types), float)
     bestfit_models = []
     bestfit_results = []
-    largest_z = 2.5
+    largest_z = 1.5
     dz = 0.01
     min_counts = 0.0001
 
+    correct_sn_model = None
+
     for i, sn_type in enumerate(sn_types):
-        params = ['t0', 'z']
+        params = ['t0']
         if sn_type == 'Ia':
             params += ['x0', 'x1', 'c']
         else:
@@ -624,6 +647,8 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         # x1 and c bounded by 3.5-sigma regions (x1: mu=0.4, sigma=0.9, c: mu=-0.04, sigma = 0.1)
         if sn_type == 'Ia':
             bounds.update({'x1': (-2.75, 3.55), 'c': (-0.39, 0.31)})
+        bounds.update({'z': (z_min, z_max)})
+        params += ['z']
 
         if multi_z_fit:
             result = None
@@ -641,10 +666,11 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
 
         # after a round of minimising the lightcurve at fixed redshifts, add redshift to allow a
         # final fit of the model to the data
-        bounds.update({'z': (z_min, z_max)})
         guess_z = True if fitted_model is sn_model else False
         result, fitted_model = sncosmo.fit_lc(lc_data, fitted_model, params, bounds=bounds,
                                               minsnr=minsnr, guess_z=guess_z)
+        if sn_type == sn_types[type_ind]:
+            correct_sn_model = copy.copy(fitted_model)
         bestfit_models.append(fitted_model)
         bestfit_results.append(result)
         try:
@@ -663,8 +689,8 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         fit_type = 'None'
     else:
         fit_type = sn_types[best_ind]
-    like_fit_type = 'None' if np.argmin(np.append(x2s, 10)) == len(x2s) else sn_types[np.argmin(np.append(x2s, 10))]
-    print(x2s / (len(lc_data['flux']) - len(sn_model.param_names)), probs, sn_types[type_ind], fit_type, like_fit_type)
+    like_fit_type = 'None' if np.argmin(np.append(x2s, 23)) == len(x2s) else sn_types[np.argmin(np.append(x2s, 23))]
+    print(x2s / (len(lc_data['flux']) - len(sn_model.param_names)), probs, sn_types[type_ind], fit_type, like_fit_type, sn_params, best_m.parameters, correct_sn_model.parameters)
 
     if make_fit_figs:
         figtext = [figtext[0], figtext[1] + '\n' + r'$\chi^2_{{\nu={}}}$ = {:.3f}'.format(
@@ -716,24 +742,27 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
 
 
 @profile
-def run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime, filt_zp,
+def run_filt_cadence_combo(directory, sn_types, filters, pixel_scale, times, exptime, filt_zp,
                            psf_comp_filename, dark_current, readnoise, t0, lambda_eff,
                            make_sky_figs, make_fit_figs, make_flux_figs, image_flag, ngals,
-                           multi_z_fit):
+                           multi_z_fit, bkg, psf_r, t_interval):
+    if not os.path.exists(directory):
+        os.makedirs(directory)
     probs, true_types, fit_types = [], [], []
     i = 0
     while i < ngals:
+        _times = times + np.random.uniform(-t_interval, t_interval)
         type_ind = np.random.choice(len(sn_types))
         if image_flag:
             images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux = \
-                make_images(filters, pixel_scale, sn_types[type_ind], times, exptime, filt_zp,
+                make_images(filters, pixel_scale, sn_types[type_ind], _times, exptime, filt_zp,
                             psf_comp_filename, dark_current, readnoise, t0, lambda_eff)
         else:
-            lc_data, sn_params, true_flux = make_fluxes(filters, sn_types[type_ind], times,
-                                                        filt_zp, t0)
+            lc_data, sn_params, true_flux = make_fluxes(filters, sn_types[type_ind], _times,
+                                                        filt_zp, t0, exptime, bkg, psf_r)
 
         if make_sky_figs and image_flag:
-            make_figures(images_with_sn, images_without_sn, diff_images, filters, times, i+1,
+            make_figures(images_with_sn, images_without_sn, diff_images, filters, _times, i+1,
                          exptime)
 
         lc_data_table = Table(data=lc_data,
@@ -757,7 +786,8 @@ def run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime, filt_
             figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
 
         prob, fit_type = fit_lc(lc_data_table, sn_types, directory, filters, i+1, figtext, ncol,
-                                minsnr, sn_priors, filt_zp, make_fit_figs, multi_z_fit, type_ind)
+                                minsnr, sn_priors, filt_zp, make_fit_figs, multi_z_fit, type_ind,
+                                sn_params)
 
         if make_flux_figs:
             gs = gridcreate('09', 1, 1, 0.8, 5)
@@ -796,6 +826,7 @@ def run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime, filt_
 
 def make_figures(images_with_sn, images_without_sn, diff_images, filters, times, i, exptime):
     n = np.random.choice(len(times))
+    # TODO: fix these times to include the randomness of the times given in run_cadence above
     t = times[n]
     iws = images_with_sn[n]
     ds = diff_images[n]
@@ -837,10 +868,18 @@ if __name__ == '__main__':
     directory = 'out_gals'
 
     filters_master = np.array(['z087', 'y106', 'w149', 'j129', 'h158', 'f184'])  # 'r062'
+
+    psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
+    psf_names = ['../PSFs/{}.fits'.format(q) for q in filters_master]
+    oversampling, N_comp, max_pix_offsets, cuts = 4, 20, [9, 9, 9, 10, 11, 11], [0.0009, 0.0009, 0.0009, 0.0008, 0.0008, 0.0007]
+
+    # pmf.psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
+    #                     'wfirst', max_pix_offsets, cuts)
+    # sys.exit()
+
     # 1 count/s for infinite aperture, hounsell17, AB magnitudes
-    # get r062 ZP if added; microsit uses 26.39 for both z087 and r602; microsit disagrees on h158
-    # by ~0.03 mags - full microsit ZPs are
-    # [26.39 r062] 26.39 26.42 [27.50 w149 mask, 27.61 no mask w149] [25.59 k208] 26.30 25.96
+    # get r062 ZP if added; microsit disagrees on h158 by ~0.03 mags - additional microsit ZPs are
+    # [26.39 r062, 27.50 w149 mask, 27.61 no mask w149, 25.59 k208] (26.30 -- j or h?)
     filt_zp_master = np.array([26.39, 26.41, 27.50, 26.35, 26.41, 25.96])
     lambda_eff_master = np.array([0.601, 0.862, 1.045, 1.251, 1.274, 1.555, 1.830])
     for j in range(0, len(filters_master)):
@@ -864,21 +903,6 @@ if __name__ == '__main__':
         bandpass = sncosmo.Bandpass(dispersion[imin:imax], transmission[imin:imax],
                                     wave_unit=u.micron, name=filters_master[j])
         sncosmo.register(bandpass)
-    # default exptime assumes ~4 filter pointings in an hour, which is a zeroth order guess at the
-    # observing plan for WFIRST at present
-    exptime = 1000  # seconds
-    sn_types = ['Ia', 'Ib', 'Ic', 'II']
-
-    t_low, t_high, t_interval = -5, 35, 20
-    times = np.arange(t_low, t_high+1e-10, t_interval)
-
-    psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
-    psf_names = ['../PSFs/{}.fits'.format(q) for q in filters_master]
-    oversampling, N_comp, max_pix_offsets, cuts = 4, 20, [9, 9, 9, 10, 11, 11], [0.0009, 0.0009, 0.0009, 0.0008, 0.0008, 0.0007]
-
-    # pmf.psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
-    #                     'wfirst', max_pix_offsets, cuts)
-    # sys.exit()
 
     # dark current and read noise from the GalSim instrument; read noise is in pure e-, but
     # the current is e-/pixel/s, so requires correcting by exposure time
@@ -905,30 +929,73 @@ if __name__ == '__main__':
 
     colours_master = np.array(['k', 'r', 'b', 'g', 'c', 'm', 'orange'])
 
-    sub_inds = [0, 3, 4]
-    filters = filters_master[sub_inds]
-    filt_zp = filt_zp_master[sub_inds]
-    colours = colours_master[sub_inds]
-    lambda_eff = lambda_eff_master[sub_inds]
+    sn_types = ['Ia', 'Ib', 'Ic', 'II']
 
-    if len(filters) * len(times) <= 5:
-        print("Filter/cadence combination does not produce sufficient data points for fitting, please increase one or both parameters.")
+    if len(glob.glob('{}/*/*.pdf'.format(directory))) > 0:
+        os.system('rm -r {}'.format(directory))
+        os.makedirs(directory)
 
-    if len(glob.glob('{}/fit_*.pdf'.format(directory))) > 0:
-        os.system('rm {}/fit_*.pdf'.format(directory))
-    if len(glob.glob('{}/flux_*.pdf'.format(directory))) > 0:
-        os.system('rm {}/flux_*.pdf'.format(directory))
-    if len(glob.glob('{}/images_*.pdf'.format(directory))) > 0:
-        os.system('rm {}/images_*.pdf'.format(directory))
+    t_intervals, n_obss = [20], [3]
+    sub_inds_combos = [[0, 3, 4]]
 
-    make_sky_figs, make_fit_figs, make_flux_figs, image_flag = False, False, False, False
-    multi_z_fit = False
+    dark = 0.015  # e/s/pixel
+    psf_r = 3  # pixel
+    snr_det = 5  # minimum SNR to consider a detection, given source and background noise
+    rnoise = 20  # readout noise RMS
+    exptimes = [1]
+    for exptime in exptimes:
+        filt_minmags = np.empty(len(filters_master), float)
+        for i in range(0, len(filt_minmags)):
+            # background counts for WFIRST is ~0.3-0.7 e/s/pix blue of F184, 1-3 e/s/pix for F184
+            if filters_master[i] == 'F184':
+                bkg = np.random.uniform(1, 3)
+            else:
+                bkg = np.random.uniform(0.3, 0.7)
+            # get f from S = f / sqrt(f/t + A) where A = D + B + R; D = (sqrt(dpt)/t)**2 = dp/t,
+            # B = (sqrt(bpt)/t)**2 = bp/t; R = (p[ * ndit] * ron / t)**2
+            R = np.pi * psf_r**2 * rnoise**2 / exptime**2
+            A = np.pi * psf_r**2 * (bkg + dark) / exptime + R
+            f = (snr_det**2 + np.sqrt(4 * A**2 * snr_det**2 * exptime**2 + snr_det**4)) / (2 * exptime)
+            filt_minmags[i] = -2.5 * np.log10(f) + filt_zp_master[i]
 
-    start = timeit.default_timer()
-    g_ia, b_cc, fp, fn = run_filt_cadence_combo(sn_types, filters, pixel_scale, times, exptime,
-                                                filt_zp, psf_comp_filename, dark_current,
-                                                readnoise, t0, lambda_eff, make_sky_figs,
-                                                make_fit_figs, make_flux_figs, image_flag, ngals,
-                                                multi_z_fit)
-    time = '{:.0f}s'.format(timeit.default_timer()-start)
-    print(g_ia, b_cc, fp, fn, time)
+    #     faintest_sn(sn_types, filters_master, filt_minmags)
+    # sys.exit()
+
+    make_sky_figs, make_fit_figs, make_flux_figs, image_flag = False, True, False, False
+    multi_z_fit = True
+
+    for exptime in exptimes:
+        for t_interval in t_intervals:
+            for n_obs in n_obss:
+                # only consider sources out to ~100 days
+                t_low, t_high = 0, (n_obs - 1) * t_interval
+                times = np.arange(t_low, min(100, t_high)+1e-10, t_interval)
+
+                for sub_inds in sub_inds_combos:
+
+                    filters = filters_master[sub_inds]
+                    filt_zp = filt_zp_master[sub_inds]
+                    colours = colours_master[sub_inds]
+                    lambda_eff = lambda_eff_master[sub_inds]
+
+                    filt_dirname = ''
+                    for f in filters:
+                        filt_dirname += f
+                    _directory = directory + '/te{}_ti{}_n{}_{}'.format(exptime, t_interval, n_obs,
+                                                                        filt_dirname)
+
+                    if len(filters) * len(times) <= 5:
+                        # given that we fit for four parameters, we need at least 5 data points
+                        g_ia, b_cc, fp, fn = np.nan, np.nan, np.nan, np.nan
+                    else:
+                        start = timeit.default_timer()
+                        g_ia, b_cc, fp, fn = run_filt_cadence_combo(_directory, sn_types, filters,
+                                                                    pixel_scale, times, exptime,
+                                                                    filt_zp, psf_comp_filename,
+                                                                    dark_current, readnoise, t0,
+                                                                    lambda_eff, make_sky_figs,
+                                                                    make_fit_figs, make_flux_figs,
+                                                                    image_flag, ngals, multi_z_fit,
+                                                                    bkg, psf_r, t_interval)
+                        time = '{:.0f}s'.format(timeit.default_timer()-start)
+                        print(g_ia, b_cc, fp, fn, time)
