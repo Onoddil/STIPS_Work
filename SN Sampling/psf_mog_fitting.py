@@ -9,6 +9,7 @@ import astropy.io.fits as pyfits
 from astropy.visualization import simple_norm
 from webbpsf import wfirst
 import copy
+import sys
 
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
@@ -19,6 +20,133 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     plt.figure(name, figsize=(z*x, z*ratio*y))
     gs = gridspec.GridSpec(y, x, **kwargs)
     return gs
+
+
+def gaussian_2d(x, x_t, mu, mu_t, sigma):
+    det_sig = np.linalg.det(sigma)
+    p = np.matmul(x_t - mu_t, np.linalg.inv(sigma))
+    # if we don't take the 0, 0 slice we accidentally propagate to shape (len, len, len, len) by
+    # having (len, len, 1, 1) shape passed through
+    mal_dist_sq = np.matmul(p, (x - mu))[:, :, 0, 0]
+    gauss_pdf = np.exp(-0.5 * mal_dist_sq) / (2 * np.pi * np.sqrt(det_sig))
+    return gauss_pdf
+
+
+def mog_galaxy(pixel_scale, filt_zp, psf_c, gal_params):
+    mu_0, n_type, e_disk, pa_disk, half_l_r, offset_r, Vgm_unit, mag, offset_ra_pix, \
+        offset_dec_pix = gal_params
+
+    cm_exp = np.array([0.00077, 0.01077, 0.07313, 0.37188, 1.39727, 3.56054, 4.74340, 1.78732])
+    vm_exp_sqrt = np.array([0.02393, 0.06490, 0.13580, 0.25096, 0.42942, 0.69672, 1.08879,
+                            1.67294])
+    cm_dev = np.array([0.00139, 0.00941, 0.04441, 0.16162, 0.48121, 1.20357, 2.54182, 4.46441,
+                       6.22821, 6.15393])
+    vm_dev_sqrt = np.array([0.00087, 0.00296, 0.00792, 0.01902, 0.04289, 0.09351, 0.20168, 0.44126,
+                            1.01833, 2.74555])
+
+    # this requires re-normalising as Hogg & Lang (2013) created profiles with unit intensity at
+    # their half-light radius, with total flux for the given profile simply being the sum of the
+    # MoG coefficients, cm, so we ensure that sum(cm) = 1 for normalisation purposes
+    cms = cm_dev / np.sum(cm_dev) if n_type == 4 else cm_exp / np.sum(cm_exp)
+    # Vm is always circular so this doesn't need to be a full matrix, but PSF m/V do need to
+    vms = np.array(vm_dev_sqrt)**2 if n_type == 4 else np.array(vm_exp_sqrt)**2
+
+    mks = psf_c[:, [0, 1]].reshape(-1, 2, 1)
+    pks = psf_c[:, 5]  # what is referred to as 'c' in psf_mog_fitting is p_k in H&L13
+    sx, sy, r = psf_c[:, 2], psf_c[:, 3], psf_c[:, 4]
+    Vks = np.array([[[sx[q]**2, r[q]*sx[q]*sy[q]], [r[q]*sx[q]*sy[q], sy[q]**2]] for
+                    q in range(0, len(sx))])
+    # covariance matrix and mean positions given in pixels, but need converting to half-light
+    mks *= (pixel_scale / half_l_r)
+    Vks *= (pixel_scale / half_l_r)**2
+
+    len_image = np.ceil(2.2*offset_r / pixel_scale).astype(int)
+    len_image = len_image + 1 if len_image % 2 == 0 else len_image
+    len_image = max(25, len_image)
+    image = np.zeros((len_image, len_image+2), float)
+    x_cent, y_cent = (image.shape[0]-1)/2, (image.shape[1]-1)/2
+
+    # positons should be in dimensionless but physical coordinates in terms of Re; first the
+    # Xg vector needs converting from its given (ra, dec) to pixel coordiantes, to be placed
+    # in the xy grid correctly (currently this just defaults to the central pixel, but it may
+    # not in the future)
+    xg = np.array([[(offset_ra_pix + x_cent) * pixel_scale / half_l_r],
+                   [(offset_dec_pix + y_cent) * pixel_scale / half_l_r]])
+    x_pos = (np.arange(0, image.shape[0])) * pixel_scale / half_l_r
+    y_pos = (np.arange(0, image.shape[1])) * pixel_scale / half_l_r
+    x, y = np.meshgrid(x_pos, y_pos, indexing='xy')
+    # n-D gaussians have mahalnobis distance (x - mu)^T Sigma^-1 (x - mu) so coords_t and m_t
+    # should be *row* vectors, and thus be shape (1, x) while coords and m should be column
+    # vectors and shape (x, 1). starting with coords, we need to add the grid of data, so if
+    # this array has shape (1, 2, y, x), and if we transpose it it'll have shape (x, y, 2, 1)
+    coords = np.transpose(np.array([[x, y]]))
+    # the "transpose" of the vector x turns from being a column vector (shape = (2, 1)) to a
+    # row vector (shape = (1, 2)), but should still have external shape (x, y), so we start
+    # with vector of (2, 1, y, x) and transpose again
+    coords_t = np.transpose(np.array([[x], [y]]))
+    # total flux in galaxy -- ensure that all units end up in flux as counts/s accordingly
+    Sg = 10**(-1/2.5 * (mag - filt_zp))
+    for k in range(0, len(mks)):
+        pk = pks[k]
+        Vk = Vks[k]
+        mk = mks[k]
+        for m_ in range(0, len(vms)):
+            cm = cms[m_]
+            vm = vms[m_]
+            # Vgm = RVR^T = vm RR^T given that V = vmI
+            Vgm = vm * Vgm_unit
+            # reshape m and m_t to force propagation of arrays, remembering row vectors are
+            # (1, x) and column vectors are (x, 1) in shape
+            m = (mk + xg).reshape(1, 1, 2, 1)
+            m_t = m.reshape(1, 1, 1, 2)
+            V = Vgm + Vk
+            g_2d = gaussian_2d(coords, coords_t, m, m_t, V)
+            # having converted the covariance matrix to half-light radii, we need to account for a
+            # corresponding reverse correction so that the PSF dimensions are correct, which are
+            # defined in pure pixel scale
+            image += Sg * cm * pk * g_2d / (half_l_r / pixel_scale)**2
+
+    return image
+
+
+def mog_add_psf(image, psf_params, filt_zp, psf_c):
+    offset_ra_pix, offset_dec_pix, mag = psf_params
+    x_cent, y_cent = (image.shape[0]-1)/2, (image.shape[1]-1)/2
+    # unlike the MoG for the galaxy profile, the PSF can be fit entirely in pure pixel coordinates,
+    # with all parameters defined in this coordinate system
+    xg = np.array([[offset_ra_pix + x_cent], [offset_dec_pix + y_cent]])
+    x_pos, y_pos = np.arange(0, image.shape[0]), np.arange(0, image.shape[1])
+    x, y = np.meshgrid(x_pos, y_pos, indexing='xy')
+    # n-D gaussians have mahalnobis distance (x - mu)^T Sigma^-1 (x - mu) so coords_t and m_t
+    # should be *row* vectors, and thus be shape (1, x) while coords and m should be column
+    # vectors and shape (x, 1). starting with coords, we need to add the grid of data, so if
+    # this array has shape (1, 2, y, x), and if we transpose it it'll have shape (x, y, 2, 1)
+    coords = np.transpose(np.array([[x, y]]))
+    # the "transpose" of the vector x turns from being a column vector (shape = (2, 1)) to a
+    # row vector (shape = (1, 2)), but should still have external shape (x, y), so we start
+    # with vector of (2, 1, y, x) and transpose again
+    coords_t = np.transpose(np.array([[x], [y]]))
+
+    mks = psf_c[:, [0, 1]].reshape(-1, 2, 1)
+    pks = psf_c[:, 5]  # what is referred to as 'c' in psf_mog_fitting is p_k in H&L13
+    sx, sy, r = psf_c[:, 2], psf_c[:, 3], psf_c[:, 4]
+    Vks = np.array([[[sx[q]**2, r[q]*sx[q]*sy[q]], [r[q]*sx[q]*sy[q], sy[q]**2]] for
+                    q in range(0, len(sx))])
+
+    # total flux in source -- ensure that all units end up in flux as counts/s accordingly
+    Sg = 10**(-1/2.5 * (mag - filt_zp))
+    for k in range(0, len(mks)):
+        pk = pks[k]
+        V = Vks[k]
+        mk = mks[k]
+        # reshape m and m_t to force propagation of arrays, remembering row vectors are
+        # (1, x) and column vectors are (x, 1) in shape
+        m = (mk + xg).reshape(1, 1, 2, 1)
+        m_t = m.reshape(1, 1, 1, 2)
+        g_2d = gaussian_2d(coords, coords_t, m, m_t, V)
+        image += Sg * pk * g_2d
+
+    return image
 
 
 def create_psf_image(filter_, directory, oversamp):
@@ -401,55 +529,63 @@ def psf_mog_fitting(psf_names, oversamp, psf_comp_filename, N_comp, type_, max_p
 
 if __name__ == '__main__':
     filters = ['r062', 'z087', 'y106', 'w149', 'j129', 'h158', 'f184']
-    # psfs is a list of HDULists
-    psfs = []
-    reduced_psfs = []
-    oversamp = 4
+    if sys.argv[1] == 'make':
+        # psfs is a list of HDULists
+        psfs = []
+        reduced_psfs = []
+        oversamp = 4
 
-    # with output_model set to 'both' HDUList [0] is the oversampled data and [1] is the
-    # detector-binned data -- i.e., the created ePSF but sampled at pixel centers, which is thus
-    # propagated into reduced_psf with [1] unchaged but [0] now the ePSF (the detector-pixel
-    # sampled fraction at oversampling levels of pixel positions).
-    for filter_ in filters:
-        psf = create_psf_image(filter_, 'psf_fit', oversamp)
-        psfs.append(psf)
-        reduced_psf = create_effective_psf(psf, oversamp)
-        rp_hdulist = pyfits.HDUList([a for a in reduced_psf])
-        rp_hdulist.writeto('../PSFs/{}.fits'.format(filter_), overwrite=True)
-        reduced_psfs.append(reduced_psf)
+        # with output_model set to 'both' HDUList [0] is the oversampled data and [1] is the
+        # detector-binned data -- i.e., the created ePSF but sampled at pixel centers, which is thus
+        # propagated into reduced_psf with [1] unchaged but [0] now the ePSF (the detector-pixel
+        # sampled fraction at oversampling levels of pixel positions).
+        for filter_ in filters:
+            psf = create_psf_image(filter_, 'psf_fit', oversamp)
+            psfs.append(psf)
+            reduced_psf = create_effective_psf(psf, oversamp)
+            rp_hdulist = pyfits.HDUList([a for a in reduced_psf])
+            rp_hdulist.writeto('../PSFs/{}.fits'.format(filter_), overwrite=True)
+            reduced_psfs.append(reduced_psf)
 
-    gs = gridcreate('a', 3, len(filters), 0.8, 5)
-    for i in range(0, len(filters)):
-        ax = plt.subplot(gs[0, i])
-        norm = simple_norm(psfs[i][1].data, 'log', percent=100)
-        img = ax.imshow(psfs[i][1].data, origin='lower', cmap='viridis', norm=norm)
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label('{} PSF Detector Response'.format(filters[i]))
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
+        gs = gridcreate('a', 3, len(filters), 0.8, 5)
+        for i in range(0, len(filters)):
+            ax = plt.subplot(gs[0, i])
+            norm = simple_norm(psfs[i][1].data, 'log', percent=100)
+            img = ax.imshow(psfs[i][1].data, origin='lower', cmap='viridis', norm=norm)
+            cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+            cb.set_label('{} PSF Detector Response'.format(filters[i]))
+            ax.set_xlabel('x / pixel')
+            ax.set_ylabel('y / pixel')
 
-        ax = plt.subplot(gs[1, i])
-        norm = simple_norm(psfs[i][0].data, 'log', percent=100)
-        img = ax.imshow(psfs[i][0].data, origin='lower', cmap='viridis', norm=norm)
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label('{} PSF Supersampled Response'.format(filters[i]))
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
+            ax = plt.subplot(gs[1, i])
+            norm = simple_norm(psfs[i][0].data, 'log', percent=100)
+            img = ax.imshow(psfs[i][0].data, origin='lower', cmap='viridis', norm=norm)
+            cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+            cb.set_label('{} PSF Supersampled Response'.format(filters[i]))
+            ax.set_xlabel('x / pixel')
+            ax.set_ylabel('y / pixel')
 
-        x, y = np.arange(0, reduced_psfs[i][0].data.shape[1])/oversamp, \
-            np.arange(0, reduced_psfs[i][0].data.shape[0])/oversamp
-        over_index_middle = 1 / 2
-        cut_int = ((x.reshape(1, -1) % 1.0 == over_index_middle) &
-                   (y.reshape(-1, 1) % 1.0 == over_index_middle))
-        print(filters[i], np.sum(psfs[i][1].data), np.amax(psfs[i][1].data),
-              np.sum(psfs[i][0].data), np.amax(psfs[i][0].data),
-              np.sum(reduced_psfs[i][0].data[cut_int]), np.amax(reduced_psfs[i][0].data))
-        ax = plt.subplot(gs[2, i])
-        norm = simple_norm(reduced_psfs[i][0].data, 'log', percent=100)
-        img = ax.imshow(reduced_psfs[i][0].data, origin='lower', cmap='viridis', norm=norm)
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label('{} PSF Response'.format(filters[i]))
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
-    plt.tight_layout()
-    plt.savefig('{}/wfirst_psfs.pdf'.format('psf_fit'))
+            x, y = np.arange(0, reduced_psfs[i][0].data.shape[1])/oversamp, \
+                np.arange(0, reduced_psfs[i][0].data.shape[0])/oversamp
+            over_index_middle = 1 / 2
+            cut_int = ((x.reshape(1, -1) % 1.0 == over_index_middle) &
+                       (y.reshape(-1, 1) % 1.0 == over_index_middle))
+            print(filters[i], np.sum(psfs[i][1].data), np.amax(psfs[i][1].data),
+                  np.sum(psfs[i][0].data), np.amax(psfs[i][0].data),
+                  np.sum(reduced_psfs[i][0].data[cut_int]), np.amax(reduced_psfs[i][0].data))
+            ax = plt.subplot(gs[2, i])
+            norm = simple_norm(reduced_psfs[i][0].data, 'log', percent=100)
+            img = ax.imshow(reduced_psfs[i][0].data, origin='lower', cmap='viridis', norm=norm)
+            cb = plt.colorbar(img, ax=ax, use_gridspec=True)
+            cb.set_label('{} PSF Response'.format(filters[i]))
+            ax.set_xlabel('x / pixel')
+            ax.set_ylabel('y / pixel')
+        plt.tight_layout()
+        plt.savefig('{}/wfirst_psfs.pdf'.format('psf_fit'))
+    elif sys.argv[1] == 'fit':
+        psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
+        psf_names = ['../PSFs/{}.fits'.format(q) for q in filters]
+        oversampling, N_comp, max_pix_offsets, cuts = 4, 20, [9, 9, 9, 10, 11, 11], [0.0009, 0.0009, 0.0009, 0.0008, 0.0008, 0.0007]
+
+        psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
+                        'wfirst', max_pix_offsets, cuts)

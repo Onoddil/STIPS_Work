@@ -2,22 +2,14 @@ import os
 import sys
 import matplotlib.gridspec as gridspec
 import numpy as np
-
-import astropy.io.fits as pyfits
 import matplotlib.pyplot as plt
 
-from astropy.visualization import simple_norm
 from scipy.special import gammaincinv
 from astropy.table import Table
 import sncosmo
-import astropy.units as u
 from scipy.ndimage import shift
 import glob
-
-import psf_mog_fitting as pmf
-
 import timeit
-import copy
 
 try:
     dummy = profile
@@ -25,6 +17,9 @@ except:
     profile = lambda x: x
 np.set_printoptions(edgeitems=10, linewidth=500, precision=4, floatmode='maxprec')
 import galsim.wfirst as wfirst
+
+import sn_sampling_extras as sse
+import psf_mog_fitting as pmf
 
 # things to add to detector to create accurate noise model:
 # sources, counting as poissonian noise
@@ -75,50 +70,6 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     return gs
 
 
-def faintest_sn(sn_types, filters, filt_minmags):
-    for sn_type in sn_types:
-        sn_model = get_sn_model(sn_type, 1)
-        for filt, filt_minmag in zip(filters, filt_minmags):
-            z = 0
-            sn_model.set(z=z)
-            while sn_model.bandoverlap(filt) and sn_model.bandmag(filt, 'ab', sn_model.source.peakphase(filt)) < filt_minmag:
-                sn_model.set(z=z)
-                z += 0.01
-            if sn_model.bandoverlap(filt):
-                print(sn_type, filt, 'z={:.2f}'.format(z), 'mag loss')
-            else:
-                print(sn_type, filt, 'z={:.2f}'.format(z), 'wavelength loss')
-
-
-def model_number(run_minutes, n_runs):
-    # assuming a static time for each run; dominated by fit, not creation currently
-    n_filt_choice = 0
-    n = 7  # including R, eventually
-    for k in np.arange(2, n+1):
-        n_filt_choice += np.math.factorial(n) / np.math.factorial(k) / np.math.factorial(n - k)
-    # cadence can vary from, say, 5 days to 40 days (5 days being the minimum needed, and 25 days
-    # giving 2 data points per lightcurve), so cadence could be varied in 5s initially, and thus
-    cadence_interval = 5
-    cadences = np.arange(5, 40+1e-10, cadence_interval)
-    n_cadence = len(cadences)
-
-    n_tot = n_filt_choice * n_cadence
-
-    time = n_tot * run_minutes * n_runs
-
-    print("{} choices, {} runs, {:.0f}/{:.0f}/{:.0f} approximate minutes/hours/days".format(n_tot, n_runs, time, time/60, time/60/24))
-
-
-def gaussian_2d(x, x_t, mu, mu_t, sigma):
-    det_sig = np.linalg.det(sigma)
-    p = np.matmul(x_t - mu_t, np.linalg.inv(sigma))
-    # if we don't take the 0, 0 slice we accidentally propagate to shape (len, len, len, len) by
-    # having (len, len, 1, 1) shape passed through
-    mal_dist_sq = np.matmul(p, (x - mu))[:, :, 0, 0]
-    gauss_pdf = np.exp(-0.5 * mal_dist_sq) / (2 * np.pi * np.sqrt(det_sig))
-    return gauss_pdf
-
-
 # flat and dark can be loaded from a fits file or found elsewhere, they are simply input
 # files to be multipled/added to the original data.
 def add_dark(image, dark_current):
@@ -154,123 +105,6 @@ def add_background(image, bkg):
 # variance lambda; this is the more general formula allowing for low counts, however.
 def add_poisson(image):
     return np.random.poisson(lam=image).astype(float)
-
-
-def mog_galaxy(pixel_scale, filt_zp, psf_c, gal_params):
-    mu_0, n_type, e_disk, pa_disk, half_l_r, offset_r, Vgm_unit, mag, offset_ra_pix, \
-        offset_dec_pix = gal_params
-
-    cm_exp = np.array([0.00077, 0.01077, 0.07313, 0.37188, 1.39727, 3.56054, 4.74340, 1.78732])
-    vm_exp_sqrt = np.array([0.02393, 0.06490, 0.13580, 0.25096, 0.42942, 0.69672, 1.08879,
-                            1.67294])
-    cm_dev = np.array([0.00139, 0.00941, 0.04441, 0.16162, 0.48121, 1.20357, 2.54182, 4.46441,
-                       6.22821, 6.15393])
-    vm_dev_sqrt = np.array([0.00087, 0.00296, 0.00792, 0.01902, 0.04289, 0.09351, 0.20168, 0.44126,
-                            1.01833, 2.74555])
-
-    # this requires re-normalising as Hogg & Lang (2013) created profiles with unit intensity at
-    # their half-light radius, with total flux for the given profile simply being the sum of the
-    # MoG coefficients, cm, so we ensure that sum(cm) = 1 for normalisation purposes
-    cms = cm_dev / np.sum(cm_dev) if n_type == 4 else cm_exp / np.sum(cm_exp)
-    # Vm is always circular so this doesn't need to be a full matrix, but PSF m/V do need to
-    vms = np.array(vm_dev_sqrt)**2 if n_type == 4 else np.array(vm_exp_sqrt)**2
-
-    mks = psf_c[:, [0, 1]].reshape(-1, 2, 1)
-    pks = psf_c[:, 5]  # what is referred to as 'c' in psf_mog_fitting is p_k in H&L13
-    sx, sy, r = psf_c[:, 2], psf_c[:, 3], psf_c[:, 4]
-    Vks = np.array([[[sx[q]**2, r[q]*sx[q]*sy[q]], [r[q]*sx[q]*sy[q], sy[q]**2]] for
-                    q in range(0, len(sx))])
-    # covariance matrix and mean positions given in pixels, but need converting to half-light
-    mks *= (pixel_scale / half_l_r)
-    Vks *= (pixel_scale / half_l_r)**2
-
-    len_image = np.ceil(2.2*offset_r / pixel_scale).astype(int)
-    len_image = len_image + 1 if len_image % 2 == 0 else len_image
-    len_image = max(25, len_image)
-    image = np.zeros((len_image, len_image+2), float)
-    x_cent, y_cent = (image.shape[0]-1)/2, (image.shape[1]-1)/2
-
-    # positons should be in dimensionless but physical coordinates in terms of Re; first the
-    # Xg vector needs converting from its given (ra, dec) to pixel coordiantes, to be placed
-    # in the xy grid correctly (currently this just defaults to the central pixel, but it may
-    # not in the future)
-    xg = np.array([[(offset_ra_pix + x_cent) * pixel_scale / half_l_r],
-                   [(offset_dec_pix + y_cent) * pixel_scale / half_l_r]])
-    x_pos = (np.arange(0, image.shape[0])) * pixel_scale / half_l_r
-    y_pos = (np.arange(0, image.shape[1])) * pixel_scale / half_l_r
-    x, y = np.meshgrid(x_pos, y_pos, indexing='xy')
-    # n-D gaussians have mahalnobis distance (x - mu)^T Sigma^-1 (x - mu) so coords_t and m_t
-    # should be *row* vectors, and thus be shape (1, x) while coords and m should be column
-    # vectors and shape (x, 1). starting with coords, we need to add the grid of data, so if
-    # this array has shape (1, 2, y, x), and if we transpose it it'll have shape (x, y, 2, 1)
-    coords = np.transpose(np.array([[x, y]]))
-    # the "transpose" of the vector x turns from being a column vector (shape = (2, 1)) to a
-    # row vector (shape = (1, 2)), but should still have external shape (x, y), so we start
-    # with vector of (2, 1, y, x) and transpose again
-    coords_t = np.transpose(np.array([[x], [y]]))
-    # total flux in galaxy -- ensure that all units end up in flux as counts/s accordingly
-    Sg = 10**(-1/2.5 * (mag - filt_zp))
-    for k in range(0, len(mks)):
-        pk = pks[k]
-        Vk = Vks[k]
-        mk = mks[k]
-        for m_ in range(0, len(vms)):
-            cm = cms[m_]
-            vm = vms[m_]
-            # Vgm = RVR^T = vm RR^T given that V = vmI
-            Vgm = vm * Vgm_unit
-            # reshape m and m_t to force propagation of arrays, remembering row vectors are
-            # (1, x) and column vectors are (x, 1) in shape
-            m = (mk + xg).reshape(1, 1, 2, 1)
-            m_t = m.reshape(1, 1, 1, 2)
-            V = Vgm + Vk
-            g_2d = gaussian_2d(coords, coords_t, m, m_t, V)
-            # having converted the covariance matrix to half-light radii, we need to account for a
-            # corresponding reverse correction so that the PSF dimensions are correct, which are
-            # defined in pure pixel scale
-            image += Sg * cm * pk * g_2d / (half_l_r / pixel_scale)**2
-
-    return image
-
-
-def mog_add_psf(image, psf_params, filt_zp, psf_c):
-    offset_ra_pix, offset_dec_pix, mag = psf_params
-    x_cent, y_cent = (image.shape[0]-1)/2, (image.shape[1]-1)/2
-    # unlike the MoG for the galaxy profile, the PSF can be fit entirely in pure pixel coordinates,
-    # with all parameters defined in this coordinate system
-    xg = np.array([[offset_ra_pix + x_cent], [offset_dec_pix + y_cent]])
-    x_pos, y_pos = np.arange(0, image.shape[0]), np.arange(0, image.shape[1])
-    x, y = np.meshgrid(x_pos, y_pos, indexing='xy')
-    # n-D gaussians have mahalnobis distance (x - mu)^T Sigma^-1 (x - mu) so coords_t and m_t
-    # should be *row* vectors, and thus be shape (1, x) while coords and m should be column
-    # vectors and shape (x, 1). starting with coords, we need to add the grid of data, so if
-    # this array has shape (1, 2, y, x), and if we transpose it it'll have shape (x, y, 2, 1)
-    coords = np.transpose(np.array([[x, y]]))
-    # the "transpose" of the vector x turns from being a column vector (shape = (2, 1)) to a
-    # row vector (shape = (1, 2)), but should still have external shape (x, y), so we start
-    # with vector of (2, 1, y, x) and transpose again
-    coords_t = np.transpose(np.array([[x], [y]]))
-
-    mks = psf_c[:, [0, 1]].reshape(-1, 2, 1)
-    pks = psf_c[:, 5]  # what is referred to as 'c' in psf_mog_fitting is p_k in H&L13
-    sx, sy, r = psf_c[:, 2], psf_c[:, 3], psf_c[:, 4]
-    Vks = np.array([[[sx[q]**2, r[q]*sx[q]*sy[q]], [r[q]*sx[q]*sy[q], sy[q]**2]] for
-                    q in range(0, len(sx))])
-
-    # total flux in source -- ensure that all units end up in flux as counts/s accordingly
-    Sg = 10**(-1/2.5 * (mag - filt_zp))
-    for k in range(0, len(mks)):
-        pk = pks[k]
-        V = Vks[k]
-        mk = mks[k]
-        # reshape m and m_t to force propagation of arrays, remembering row vectors are
-        # (1, x) and column vectors are (x, 1) in shape
-        m = (mk + xg).reshape(1, 1, 2, 1)
-        m_t = m.reshape(1, 1, 1, 2)
-        g_2d = gaussian_2d(coords, coords_t, m, m_t, V)
-        image += Sg * pk * g_2d
-
-    return image
 
 
 def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
@@ -416,8 +250,8 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
         # non-reference image should be offset by half a pixel, wrapped around [0, 1]
         second_gal_offets[j, 0] = (offset_ra + sign * 0.5 + 1) % 1
         second_gal_offets[j, 1] = (offset_dec + sign * 0.5 + 1) % 1
-        image = mog_galaxy(pixel_scale, filt_zp[j], psf_comp[j], gal_params +
-                           [offset_ra, offset_dec])
+        image = pmf.mog_galaxy(pixel_scale, filt_zp[j], psf_comp[j], gal_params +
+                               [offset_ra, offset_dec])
         q = np.where(image < 0)
         image[q] = 1e-8
         image = add_background(image, zod_count[j])
@@ -454,10 +288,10 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
 
             # if cosmicrays are needed then figure out what stips does for that...
             offset_ra, offset_dec = second_gal_offets[j, :]
-            image = mog_galaxy(pixel_scale, filt_zp[j], psf_comp[j],
-                               gal_params + [offset_ra, offset_dec])
-            image = mog_add_psf(image, [rand_ra / pixel_scale, rand_dec / pixel_scale, m_ia],
-                                filt_zp[j], psf_comp[j])
+            image = pmf.mog_galaxy(pixel_scale, filt_zp[j], psf_comp[j],
+                                   gal_params + [offset_ra, offset_dec])
+            image = pmf.mog_add_psf(image, [rand_ra / pixel_scale, rand_dec / pixel_scale, m_ia],
+                                    filt_zp[j], psf_comp[j])
             q = np.where(image < 0)
             image[q] = 1e-8
             image = add_background(image, zod_count[j])
@@ -515,7 +349,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     return images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux
 
 
-def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, bkg, psf_r):
+def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, psf_r):
     nfilts = len(filters)
     ntimes = len(times)
 
@@ -543,6 +377,10 @@ def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, bkg, psf_r):
     true_flux = []
     for k in range(0, ntimes):
         for j in range(0, nfilts):
+            if filters[j] == 'F184':
+                bkg = np.random.uniform(1, 3)
+            else:
+                bkg = np.random.uniform(0.3, 0.7)
             # TODO: add exposure and readout time so that exposures are staggered in time
             time = times[k] + t0
 
@@ -563,7 +401,6 @@ def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, bkg, psf_r):
             flux_err = np.sqrt(np.sqrt(t_f * exptime)**2 + (0.005 * t_f * exptime)**2 +
                                np.sqrt(bkg * exptime * np.pi * psf_r**2)**2) / exptime
             flux = np.random.normal(loc=t_f, scale=flux_err)
-            print(t_f, flux, flux_err, m_ia, filt_zp[j])
             time_array.append(time)
             band_array.append(filters[j])
             flux_array.append(flux)
@@ -588,7 +425,7 @@ def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, bkg, psf_r):
 
 
 @profile
-def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr, sn_priors,
+def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_priors,
            filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params):
     x2s = np.empty(len(sn_types), float)
     bestfit_models = []
@@ -596,8 +433,6 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
     largest_z = 1.5
     dz = 0.01
     min_counts = 0.0001
-
-    correct_sn_model = None
 
     for i, sn_type in enumerate(sn_types):
         params = ['t0']
@@ -669,8 +504,6 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
         guess_z = True if fitted_model is sn_model else False
         result, fitted_model = sncosmo.fit_lc(lc_data, fitted_model, params, bounds=bounds,
                                               minsnr=minsnr, guess_z=guess_z)
-        if sn_type == sn_types[type_ind]:
-            correct_sn_model = copy.copy(fitted_model)
         bestfit_models.append(fitted_model)
         bestfit_results.append(result)
         try:
@@ -679,256 +512,119 @@ def fit_lc(lc_data, sn_types, directory, filters, counter, figtext, ncol, minsnr
             x2s[i] = sncosmo.chisq(lc_data, fitted_model)
 
     # TODO: add a fire extinguisher null hypothesis probability properly
-    probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-5)
-    probs /= np.sum(probs)
-    best_ind = np.argmax(probs[:-1])
-    best_r = bestfit_results[best_ind]
-    best_m = bestfit_models[best_ind]
-    best_x2 = x2s[best_ind]
-    if np.argmax(probs) == len(probs) - 1:
-        fit_type = 'None'
-    else:
-        fit_type = sn_types[best_ind]
-    like_fit_type = 'None' if np.argmin(np.append(x2s, 23)) == len(x2s) else sn_types[np.argmin(np.append(x2s, 23))]
-    print(x2s / (len(lc_data['flux']) - len(sn_model.param_names)), probs, sn_types[type_ind], fit_type, like_fit_type, sn_params, best_m.parameters, correct_sn_model.parameters)
+    # if this was p = p(m) * l(d) then ln(p) = ln(p(m)) - x2/2; fire extinguisher probability
+    # becomes -2 ln(f) = 32 for p_f ~ 1e-7
+    log_fire = -2 * np.log(1e-7)
+    # probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-7)
+    # probs /= np.sum(probs)
+    # prob = probs[0] if sn_types[type_ind] == 'Ia' else 1 - probs[0]
+    # lnprob = np.log(prob)
+    
+
 
     if make_fit_figs:
-        figtext = [figtext[0], figtext[1] + '\n' + r'$\chi^2_{{\nu={}}}$ = {:.3f}'.format(
-                   best_r.ndof, best_x2/best_r.ndof)]
-        errors = best_r.errors
-        model_params = best_m.parameters
-        if sn_types[best_ind] == 'Ia':
-            z_format = sncosmo.utils.format_value(model_params[0], errors.get('z'), latex=True)
-            t0_format = sncosmo.utils.format_value(model_params[1], errors.get('t0'), latex=True)
-            x0_format = sncosmo.utils.format_value(model_params[2], errors.get('x0'), latex=True)
-            x1_format = sncosmo.utils.format_value(model_params[3], errors.get('x1'), latex=True)
-            c_format = sncosmo.utils.format_value(model_params[4], errors.get('c'), latex=True)
-            figtext.append('Type {}: $z = {}$\n$t_0 = {}$\n$x_0 = {}$'.format(sn_types[best_ind],
-                           z_format, t0_format, x0_format))
-            if probs[0] > 0:
-                p_sig = int(np.floor(np.log10(abs(probs[0]))))
-            else:
-                p_sig = 0
-            if p_sig > 3:
-                figtext.append('$x_1 = {}$\n$c = {}$\n$P(Ia|D) = {:.3f} \\times 10^{}$'.format(
-                               x1_format, c_format, probs[0]/10**p_sig, p_sig))
-            else:
-                figtext.append('$x_1 = {}$\n$c = {}$\n$P(Ia|D) = {:.3f}$'.format(x1_format,
-                               c_format, probs[0]))
-        else:
-            z_format = sncosmo.utils.format_value(model_params[0], errors.get('z'), latex=True)
-            t0_format = sncosmo.utils.format_value(model_params[1], errors.get('t0'), latex=True)
-            A_format = sncosmo.utils.format_value(model_params[2], errors.get('amplitude'),
-                                                  latex=True)
-            figtext.append('Type {}: $z = {}$\n$t_0 = {}$'.format(sn_types[best_ind],
-                           z_format, t0_format))
-            if probs[0] > 0:
-                p_sig = int(np.floor(np.log10(abs(probs[0]))))
-            else:
-                p_sig = 0
-            if p_sig > 3:
-                figtext.append('$A = {}$\n$P(Ia|D) = {:.3f} \\times 10^{{{}}}$'.format(
-                    A_format, probs[0]/10**p_sig, p_sig))
-            else:
-                figtext.append('$A = {}$\n$P(Ia|D) = {:.3f}$'.format(A_format, probs[0]))
+        sse.make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results,
+                         bestfit_models, figtext)
 
-        ypad = 4 if sn_types[best_ind] == 'Ia' else 2
-        fig = sncosmo.plot_lc(lc_data, model=bestfit_models, xfigsize=5*ncol, tighten_ylim=False,
-                              ncol=ncol, figtext=figtext, figtextsize=ypad, model_label=sn_types)
-        fig.tight_layout(rect=[0, 0.03, 1, 0.935])
-        fig.savefig('{}/fit_{}.pdf'.format(directory, counter))
-
-    return probs[0], fit_type
+    return lnprob
 
 
 @profile
 def run_filt_cadence_combo(directory, sn_types, filters, pixel_scale, times, exptime, filt_zp,
                            psf_comp_filename, dark_current, readnoise, t0, lambda_eff,
-                           make_sky_figs, make_fit_figs, make_flux_figs, image_flag, ngals,
-                           multi_z_fit, bkg, psf_r, t_interval):
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-    probs, true_types, fit_types = [], [], []
-    i = 0
-    while i < ngals:
-        _times = times + np.random.uniform(-t_interval, t_interval)
-        type_ind = np.random.choice(len(sn_types))
-        if image_flag:
-            images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux = \
-                make_images(filters, pixel_scale, sn_types[type_ind], _times, exptime, filt_zp,
-                            psf_comp_filename, dark_current, readnoise, t0, lambda_eff)
-        else:
-            lc_data, sn_params, true_flux = make_fluxes(filters, sn_types[type_ind], _times,
-                                                        filt_zp, t0, exptime, bkg, psf_r)
+                           make_sky_figs, make_fit_figs, make_flux_figs, image_flag,
+                           multi_z_fit, psf_r, t_interval, n_obs):
+    # only consider sources out to ~100 days
+    t_low, t_high = 0, (n_obs - 1) * t_interval
+    times = np.arange(t_low, min(100, t_high)+1e-10, t_interval) + \
+        np.random.uniform(-t_interval, t_interval)
+    if len(filters) * len(times) <= 5:
+        return -np.inf
 
-        if make_sky_figs and image_flag:
-            make_figures(images_with_sn, images_without_sn, diff_images, filters, _times, i+1,
+    type_ind = np.random.choice(len(sn_types))
+    if image_flag:
+        images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux = \
+            make_images(filters, pixel_scale, sn_types[type_ind], times, exptime, filt_zp,
+                        psf_comp_filename, dark_current, readnoise, t0, lambda_eff)
+    else:
+        lc_data, sn_params, true_flux = make_fluxes(filters, sn_types[type_ind], times,
+                                                    filt_zp, t0, exptime, psf_r)
+
+    if make_sky_figs and image_flag:
+        sse.make_figures(images_with_sn, images_without_sn, diff_images, filters, times,
                          exptime)
 
-        lc_data_table = Table(data=lc_data,
-                              names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
-        if not np.amax(lc_data_table['flux'].data / lc_data_table['fluxerr'].data) >= minsnr:
-            continue
+    lc_data_table = Table(data=lc_data,
+                          names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
+    if not np.amax(lc_data_table['flux'].data / lc_data_table['fluxerr'].data) >= minsnr:
+        return -np.inf
 
-        figtext = []
-        if sn_types[type_ind] == 'Ia':
-            z_, t_, x0_, x1_, c_ = sn_params
-            figtext.append('Type {}: $z = {:.3f}$\n$t_0 = {:.1f}$\n'
-                           '$x_0 = {:.5f}$'.format(sn_types[type_ind], z_, t_, x0_))
-            figtext.append('$x_1 = {:.5f}$\n$c = {:.5f}$'.format(x1_, c_))
-        else:
-            z_ = sn_params[0]
-            t_ = sn_params[1]
-            A_ = sn_params[2]
-            A_sig = int(np.floor(np.log10(abs(A_))))
-            figtext.append('Type {}: $z = {:.3f}$\n$t_0 = {:.1f}$'.format(
-                           sn_types[type_ind], z_, t_))
-            figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
+    figtext = []
+    if sn_types[type_ind] == 'Ia':
+        z_, t_, x0_, x1_, c_ = sn_params
+        figtext.append('Type {}: $z = {:.3f}$\n$t_0 = {:.1f}$\n'
+                       '$x_0 = {:.5f}$'.format(sn_types[type_ind], z_, t_, x0_))
+        figtext.append('$x_1 = {:.5f}$\n$c = {:.5f}$'.format(x1_, c_))
+    else:
+        z_ = sn_params[0]
+        t_ = sn_params[1]
+        A_ = sn_params[2]
+        A_sig = int(np.floor(np.log10(abs(A_))))
+        figtext.append('Type {}: $z = {:.3f}$\n$t_0 = {:.1f}$'.format(
+                       sn_types[type_ind], z_, t_))
+        figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
 
-        prob, fit_type = fit_lc(lc_data_table, sn_types, directory, filters, i+1, figtext, ncol,
-                                minsnr, sn_priors, filt_zp, make_fit_figs, multi_z_fit, type_ind,
-                                sn_params)
+    lnprob = fit_lc(lc_data_table, sn_types, directory, filters, figtext, ncol, minsnr,
+                    sn_priors, filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params)
 
-        if make_flux_figs:
-            gs = gridcreate('09', 1, 1, 0.8, 5)
-            ax = plt.subplot(gs[0])
-            for c, filter_ in zip(colours, filters):
-                q = lc_data_table['band'] == filter_
-                ax.errorbar(lc_data_table['time'][q], (lc_data_table['flux'][q] - true_flux[q]) /
-                            true_flux[q], yerr=lc_data_table['fluxerr'][q]/true_flux[q],
-                            fmt='{}.'.format(c), label=filter_)
-            ax.legend(shadow=False, framealpha=0)
-            ax.axhline(0, c='k', ls='--')
-            ax.set_xlabel('Time')
-            ax.set_ylabel('Flux difference (fit - true)/true')
-            plt.tight_layout()
-            plt.savefig('{}/flux_ratio_{}.pdf'.format(directory, i+1))
+    if make_flux_figs:
+        gs = gridcreate('09', 1, 1, 0.8, 5)
+        ax = plt.subplot(gs[0])
+        for c, filter_ in zip(colours, filters):
+            q = lc_data_table['band'] == filter_
+            ax.errorbar(lc_data_table['time'][q], (lc_data_table['flux'][q] - true_flux[q]) /
+                        true_flux[q], yerr=lc_data_table['fluxerr'][q]/true_flux[q],
+                        fmt='{}.'.format(c), label=filter_)
+        ax.legend(shadow=False, framealpha=0)
+        ax.axhline(0, c='k', ls='--')
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Flux difference (fit - true)/true')
+        plt.tight_layout()
+        plt.savefig('{}/flux_ratio.pdf'.format(directory))
 
-        # if the original SN is a Ia, then prob will be a "goodness of Ia-ness", but if the SN is
-        # a CC (Ib/Ic/II) then the probability will be a "badness of CC-ness"; if we're fitting a
-        # true Ia then we want the probability to be high, otherwise it should be low, but in
-        # all cases the probability is P(Ia|D) = P(Ia) * p(D|Ia) / sum_j P(j) p(D|j)
-        probs.append(prob)
-        true_types.append(sn_types[type_ind])
-        fit_types.append(fit_type)
-        i += 1
-    # as well as the overall goodness of Ia and badness of CC arrays, we should also pass back the
-    # false positive and false negative rates. FPs are non-Ias fit as Ias, and false negatives are
-    # Ias fit as non-Ias
-    probs, true_types, fit_types = np.array(probs), np.array(true_types), np.array(fit_types)
-    q = true_types == 'Ia'
-    goodness_of_ia = np.percentile(probs[q], [16, 50, 84])
-    badness_of_cc = np.percentile(probs[np.logical_not(q)], [16, 50, 84])
-    fp_rate = np.sum((true_types != 'Ia') & (fit_types == 'Ia')) / ngals
-    fn_rate = np.sum((true_types == 'Ia') & (fit_types != 'Ia')) / ngals
-    return goodness_of_ia, badness_of_cc, fp_rate, fn_rate
-
-
-def make_figures(images_with_sn, images_without_sn, diff_images, filters, times, i, exptime):
-    n = np.random.choice(len(times))
-    # TODO: fix these times to include the randomness of the times given in run_cadence above
-    t = times[n]
-    iws = images_with_sn[n]
-    ds = diff_images[n]
-    gs = gridcreate('1', 3, len(filters), 0.8, 5)
-    for j, (iw, iwo, d, f) in enumerate(zip(iws, images_without_sn, ds, filters)):
-        ax = plt.subplot(gs[0, j])
-        norm = simple_norm(iw / exptime, 'linear', percent=100)
-        img = ax.imshow(iw / exptime, cmap='viridis', norm=norm, origin='lower')
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label(r'Flux / e$^-\,\mathrm{s}^{-1}$')
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel, {}, t = {:.0f}'.format(f, t))
-        ax = plt.subplot(gs[1, j])
-        norm = simple_norm(iwo / exptime, 'linear', percent=100)
-        img = ax.imshow(iwo / exptime, cmap='viridis', norm=norm, origin='lower')
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label(r'Flux / e$^-\,\mathrm{s}^{-1}$')
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
-        ax = plt.subplot(gs[2, j])
-        norm = simple_norm(d / exptime, 'linear', percent=100)
-        img = ax.imshow(d / exptime, cmap='viridis', norm=norm, origin='lower')
-        cb = plt.colorbar(img, ax=ax, use_gridspec=True)
-        cb.set_label(r'Flux / e$^-\,\mathrm{s}^{-1}$')
-        ax.set_xlabel('x / pixel')
-        ax.set_ylabel('y / pixel')
-    plt.tight_layout()
-    plt.savefig('out_gals/images_{}.pdf'.format(i))
-    plt.close()
+    # if we're fitting a true Ia then we want the probability to be high, otherwise it should
+    # be low; the probability is P(Ia|D) = P(Ia) * p(D|Ia) / sum_j P(j) p(D|j) or
+    # P(CC|D) = 1 - P(Ia|D)
+    return lnprob
 
 
 if __name__ == '__main__':
-    ngals = 10
     # run_mins = 20/60
-    # model_number(run_mins, ngals)
+    # sse.model_number(run_mins, ngals)
 
     # sys.exit()
 
     directory = 'out_gals'
+    psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
 
     filters_master = np.array(['z087', 'y106', 'w149', 'j129', 'h158', 'f184'])  # 'r062'
-
-    psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
-    psf_names = ['../PSFs/{}.fits'.format(q) for q in filters_master]
-    oversampling, N_comp, max_pix_offsets, cuts = 4, 20, [9, 9, 9, 10, 11, 11], [0.0009, 0.0009, 0.0009, 0.0008, 0.0008, 0.0007]
-
-    # pmf.psf_mog_fitting(psf_names, oversampling, psf_comp_filename, N_comp,
-    #                     'wfirst', max_pix_offsets, cuts)
-    # sys.exit()
+    colours_master = np.array(['k', 'r', 'b', 'g', 'c', 'm', 'orange'])
 
     # 1 count/s for infinite aperture, hounsell17, AB magnitudes
     # get r062 ZP if added; microsit disagrees on h158 by ~0.03 mags - additional microsit ZPs are
     # [26.39 r062, 27.50 w149 mask, 27.61 no mask w149, 25.59 k208] (26.30 -- j or h?)
     filt_zp_master = np.array([26.39, 26.41, 27.50, 26.35, 26.41, 25.96])
     lambda_eff_master = np.array([0.601, 0.862, 1.045, 1.251, 1.274, 1.555, 1.830])
-    for j in range(0, len(filters_master)):
-        f = pyfits.open('../../webbpsf-data/WFI/filters/{}_throughput.fits'.format(
-                        filters_master[j].upper()))
-        data = f[1].data
-        dispersion = np.array([d[0] * 1e-4 for d in data])
-        transmission = np.array([d[1] * 0.95 for d in data])
-        # both F184 and W149 extend 0.004 microns into 2 microns, beyond the wavelength range of
-        # the less extended models, 19990A, or 1.999 microns. Thus we slightly chop the ends off
-        # these filters, and set the final 'zero' to 1.998 microns:
-        if filters_master[j] == 'f184' or filters_master[j] == 'w149':
-            ind_ = np.where(dispersion < 1.999)[0][-1]
-            dispersion[ind_+1] = 1.9998
-            dispersion[ind_+2] = 1.99985
-        q_ = np.argmax(transmission)
-        if transmission[q_] == transmission[q_+1]:
-            q_ += 1
-        imin = np.where(transmission[:q_] == 0)[0][-1]
-        imax = np.where(transmission[q_:] == 0)[0][0] + q_ + 1
-        bandpass = sncosmo.Bandpass(dispersion[imin:imax], transmission[imin:imax],
-                                    wave_unit=u.micron, name=filters_master[j])
-        sncosmo.register(bandpass)
+    sse.register_filters(filters_master)
 
     # dark current and read noise from the GalSim instrument; read noise is in pure e-, but
     # the current is e-/pixel/s, so requires correcting by exposure time
-    readnoise = wfirst.read_noise
-    dark_current = wfirst.dark_current
+    readnoise, dark_current = wfirst.read_noise, wfirst.dark_current
     pixel_scale = wfirst.pixel_scale  # arcsecond/pixel
 
-    t0 = 50000
-    minsnr = 5
+    t0, minsnr, ncol = 50000, 5, min(3, len(filters_master))
 
-    ncol = min(3, len(filters_master))
-
-    # priors on supernovae types: very roughly, these are the relative fractions of each type in
-    # the universe, to set the relative likelihoods of the observations with no information; these
-    # should follow sn_types as [Ia, Ib, Ic, II]. Boissier & prantzos 2009 quote, roughly and
-    # drawn by eye: Ibc/II ~ 0.3, Ic/Ib ~ 1.25, Ia/CC ~ 0.25. Hakobyan 2014, table 8, give:
-    NiaNcc, NibcNii, NicNib = 0.44, 0.36, 2.12
-    # given a/b=x we get a = x/(1+x) and b = 1/(1+x) = 1 - x/(1+x), so we can convert these to
-    # relative fractions:
-    fia, fcc = NiaNcc / (1 + NiaNcc), 1 - NiaNcc / (1 + NiaNcc)
-    fibc, fii = fcc * NibcNii / (1 + NibcNii), fcc * (1 - NibcNii / (1 + NibcNii))
-    fib, fic = fibc * (1 - NicNib / (1 + NicNib)), fibc * NicNib / (1 + NicNib)
-    sn_priors = np.array([fia, fib, fic, fii])
-
-    colours_master = np.array(['k', 'r', 'b', 'g', 'c', 'm', 'orange'])
-
+    sn_priors = sse.get_sn_priors()
     sn_types = ['Ia', 'Ib', 'Ic', 'II']
 
     if len(glob.glob('{}/*/*.pdf'.format(directory))) > 0:
@@ -942,60 +638,30 @@ if __name__ == '__main__':
     psf_r = 3  # pixel
     snr_det = 5  # minimum SNR to consider a detection, given source and background noise
     rnoise = 20  # readout noise RMS
-    exptimes = [1]
-    for exptime in exptimes:
-        filt_minmags = np.empty(len(filters_master), float)
-        for i in range(0, len(filt_minmags)):
-            # background counts for WFIRST is ~0.3-0.7 e/s/pix blue of F184, 1-3 e/s/pix for F184
-            if filters_master[i] == 'F184':
-                bkg = np.random.uniform(1, 3)
-            else:
-                bkg = np.random.uniform(0.3, 0.7)
-            # get f from S = f / sqrt(f/t + A) where A = D + B + R; D = (sqrt(dpt)/t)**2 = dp/t,
-            # B = (sqrt(bpt)/t)**2 = bp/t; R = (p[ * ndit] * ron / t)**2
-            R = np.pi * psf_r**2 * rnoise**2 / exptime**2
-            A = np.pi * psf_r**2 * (bkg + dark) / exptime + R
-            f = (snr_det**2 + np.sqrt(4 * A**2 * snr_det**2 * exptime**2 + snr_det**4)) / (2 * exptime)
-            filt_minmags[i] = -2.5 * np.log10(f) + filt_zp_master[i]
 
-    #     faintest_sn(sn_types, filters_master, filt_minmags)
+    # sse.faintest_sn(sn_types, filters_master, exptime, filt_zp_master, snr_det, psf_r, rnoise,
+    #                 dark)
     # sys.exit()
 
     make_sky_figs, make_fit_figs, make_flux_figs, image_flag = False, True, False, False
     multi_z_fit = True
 
-    for exptime in exptimes:
-        for t_interval in t_intervals:
-            for n_obs in n_obss:
-                # only consider sources out to ~100 days
-                t_low, t_high = 0, (n_obs - 1) * t_interval
-                times = np.arange(t_low, min(100, t_high)+1e-10, t_interval)
+    exptime, t_interval, n_obs = 100, 20, 3
 
-                for sub_inds in sub_inds_combos:
+    for sub_inds in sub_inds_combos:
 
-                    filters = filters_master[sub_inds]
-                    filt_zp = filt_zp_master[sub_inds]
-                    colours = colours_master[sub_inds]
-                    lambda_eff = lambda_eff_master[sub_inds]
+        filters = filters_master[sub_inds]
+        filt_zp = filt_zp_master[sub_inds]
+        colours = colours_master[sub_inds]
+        lambda_eff = lambda_eff_master[sub_inds]
 
-                    filt_dirname = ''
-                    for f in filters:
-                        filt_dirname += f
-                    _directory = directory + '/te{}_ti{}_n{}_{}'.format(exptime, t_interval, n_obs,
-                                                                        filt_dirname)
+        if not os.path.exists(directory):
+            os.makedirs(directory)
 
-                    if len(filters) * len(times) <= 5:
-                        # given that we fit for four parameters, we need at least 5 data points
-                        g_ia, b_cc, fp, fn = np.nan, np.nan, np.nan, np.nan
-                    else:
-                        start = timeit.default_timer()
-                        g_ia, b_cc, fp, fn = run_filt_cadence_combo(_directory, sn_types, filters,
-                                                                    pixel_scale, times, exptime,
-                                                                    filt_zp, psf_comp_filename,
-                                                                    dark_current, readnoise, t0,
-                                                                    lambda_eff, make_sky_figs,
-                                                                    make_fit_figs, make_flux_figs,
-                                                                    image_flag, ngals, multi_z_fit,
-                                                                    bkg, psf_r, t_interval)
-                        time = '{:.0f}s'.format(timeit.default_timer()-start)
-                        print(g_ia, b_cc, fp, fn, time)
+        start = timeit.default_timer()
+        ln_prob = run_filt_cadence_combo(directory, sn_types, filters,
+                                         pixel_scale, exptime, filt_zp, psf_comp_filename,
+                                         dark_current, readnoise, t0, lambda_eff, make_sky_figs,
+                                         make_fit_figs, make_flux_figs, image_flag,
+                                         multi_z_fit, psf_r, t_interval, n_obs)
+        time = '{:.0f}s'.format(timeit.default_timer()-start)
