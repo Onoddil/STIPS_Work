@@ -512,25 +512,38 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
             x2s[i] = sncosmo.chisq(lc_data, fitted_model)
 
     # TODO: add a fire extinguisher null hypothesis probability properly
-    # if this was p = p(m) * l(d) then ln(p) = ln(p(m)) - x2/2; fire extinguisher probability
-    # becomes -2 ln(f) = 32 for p_f ~ 1e-7
-    log_fire = -2 * np.log(1e-7)
-    # probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-7)
-    # probs /= np.sum(probs)
-    # prob = probs[0] if sn_types[type_ind] == 'Ia' else 1 - probs[0]
-    # lnprob = np.log(prob)
-    
+    if fit_cc:
+        # fit probability of returning Ia vs CC
+        probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-7)
+        probs /= np.sum(probs)
+        prob = probs[0] if sn_types[type_ind] == 'Ia' else np.sum(probs[1:-1])
+        if prob > 0:
+            lnprob = np.log(prob)
+        else:
+            lnprob = -np.inf
 
+        if make_fit_figs:
+            sse.make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results,
+                             bestfit_models, figtext)
+    else:
+        # fit probability of injected model being returned
+        # if this was p = p(m) * p(d|m) / p(d) = p(m) * p(d|m) / sum_i(p(d|mi)p(mi)) then
+        # ln(p) = ln(p(m)) - x2/2 - ln(sum_i(p(d|mi)p(mi)));
+        # fire extinguisher probability becomes -2 ln(f) = 32 for p_f ~ 1e-7
+        lnprobs_norm = np.log(np.sum(np.append(sn_priors*np.exp(-0.5 * x2s), 1e-7)))
+        lnprob = np.log(sn_priors[type_ind]) - x2s[type_ind]/2 + lnprobs_norm
 
-    if make_fit_figs:
-        sse.make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results,
-                         bestfit_models, figtext)
+        if make_fit_figs:
+            probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-7)
+            probs /= np.sum(probs)
+            sse.make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results,
+                             bestfit_models, figtext)
 
     return lnprob
 
 
 @profile
-def run_filt_cadence_combo(directory, sn_types, filters, pixel_scale, times, exptime, filt_zp,
+def run_filt_cadence_combo(directory, sn_types, filters, pixel_scale, exptime, filt_zp,
                            psf_comp_filename, dark_current, readnoise, t0, lambda_eff,
                            make_sky_figs, make_fit_figs, make_flux_figs, image_flag,
                            multi_z_fit, psf_r, t_interval, n_obs):
@@ -627,9 +640,8 @@ if __name__ == '__main__':
     sn_priors = sse.get_sn_priors()
     sn_types = ['Ia', 'Ib', 'Ic', 'II']
 
-    if len(glob.glob('{}/*/*.pdf'.format(directory))) > 0:
-        os.system('rm -r {}'.format(directory))
-        os.makedirs(directory)
+    if len(glob.glob('{}/*.pdf'.format(directory))) > 0:
+        os.system('rm {}/*.pdf'.format(directory))
 
     t_intervals, n_obss = [20], [3]
     sub_inds_combos = [[0, 3, 4]]
@@ -643,8 +655,8 @@ if __name__ == '__main__':
     #                 dark)
     # sys.exit()
 
-    make_sky_figs, make_fit_figs, make_flux_figs, image_flag = False, True, False, False
-    multi_z_fit = True
+    make_sky_figs, make_fit_figs, make_flux_figs, image_flag = False, False, False, False
+    multi_z_fit, fit_cc = False, True
 
     exptime, t_interval, n_obs = 100, 20, 3
 
@@ -655,13 +667,12 @@ if __name__ == '__main__':
         colours = colours_master[sub_inds]
         lambda_eff = lambda_eff_master[sub_inds]
 
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-
-        start = timeit.default_timer()
-        ln_prob = run_filt_cadence_combo(directory, sn_types, filters,
-                                         pixel_scale, exptime, filt_zp, psf_comp_filename,
-                                         dark_current, readnoise, t0, lambda_eff, make_sky_figs,
-                                         make_fit_figs, make_flux_figs, image_flag,
-                                         multi_z_fit, psf_r, t_interval, n_obs)
-        time = '{:.0f}s'.format(timeit.default_timer()-start)
+        for _ in range(0, 50):
+            start = timeit.default_timer()
+            ln_prob = run_filt_cadence_combo(directory, sn_types, filters,
+                                             pixel_scale, exptime, filt_zp, psf_comp_filename,
+                                             dark_current, readnoise, t0, lambda_eff, make_sky_figs,
+                                             make_fit_figs, make_flux_figs, image_flag,
+                                             multi_z_fit, psf_r, t_interval, n_obs)
+            time = '{:.2f}s'.format(timeit.default_timer()-start)
+            print(np.exp(ln_prob), time)

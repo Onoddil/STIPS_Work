@@ -99,7 +99,7 @@ def faintest_sn(sn_types, filters, filt_minmags, exptime, filt_zp, snr_det, psf_
                 print(sn_type, filt, 'z={:.2f}'.format(z), 'wavelength loss')
 
 
-def register_filts(filters):
+def register_filters(filters):
     for j in range(0, len(filters)):
         f = pyfits.open('../../webbpsf-data/WFI/filters/{}_throughput.fits'.format(
                         filters[j].upper()))
