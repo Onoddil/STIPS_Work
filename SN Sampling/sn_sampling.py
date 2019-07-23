@@ -21,6 +21,10 @@ import galsim.wfirst as wfirst
 import sn_sampling_extras as sse
 import psf_mog_fitting as pmf
 
+import emcee
+import corner
+from multiprocessing import Pool
+
 # things to add to detector to create accurate noise model:
 # sources, counting as poissonian noise
 # dark
@@ -398,8 +402,13 @@ def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, psf_r):
             # counts in e/s/pixel, assuming a WFIRST aperture size of psf_r pix, or ~pi r^2 pixels,
             # remembering to correct for the fact that uncertainties in fluxes are really done in
             # photon counts, so multiply then divide by exptime
-            flux_err = np.sqrt(np.sqrt(t_f * exptime)**2 + (0.005 * t_f * exptime)**2 +
-                               np.sqrt(bkg * exptime * np.pi * psf_r**2)**2) / exptime
+            npix = np.pi * psf_r**2
+            _f = t_f * exptime
+            _d = dark * npix * exptime
+            _b = bkg * npix * exptime
+            _r = npix**2 * readnoise**2
+            flux_err = np.sqrt(np.sqrt(_f)**2 + (0.005 * _f)**2 +
+                               np.sqrt(_b)**2 + np.sqrt(_d)**2 + np.sqrt(_r)**2) / exptime
             flux = np.random.normal(loc=t_f, scale=flux_err)
             time_array.append(time)
             band_array.append(filters[j])
@@ -426,7 +435,7 @@ def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, psf_r):
 
 @profile
 def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_priors,
-           filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params):
+           filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params, return_full):
     x2s = np.empty(len(sn_types), float)
     bestfit_models = []
     bestfit_results = []
@@ -512,9 +521,17 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
             x2s[i] = sncosmo.chisq(lc_data, fitted_model)
 
     # TODO: add a fire extinguisher null hypothesis probability properly
+
+    # given a reduced chi-squared of 10, we need to know what the regular chi-squared would be
+    x2v_f = 10
+    # fit parameters is always z/t0, but Ia models have 3 additional paramters to the CC's 1
+    n_param = 5 if sn_types[type_ind] == 'Ia' else 3
+    x2_f = x2v_f * (len(lc_data['flux']) - n_param)
+    fire_prior = 1e-3
+    fire = fire_prior * np.exp(-x2_f / 2)
     if fit_cc:
         # fit probability of returning Ia vs CC
-        probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-7)
+        probs = np.append(sn_priors*np.exp(-0.5 * x2s), fire)
         probs /= np.sum(probs)
         prob = probs[0] if sn_types[type_ind] == 'Ia' else np.sum(probs[1:-1])
         if prob > 0:
@@ -528,30 +545,37 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
     else:
         # fit probability of injected model being returned
         # if this was p = p(m) * p(d|m) / p(d) = p(m) * p(d|m) / sum_i(p(d|mi)p(mi)) then
-        # ln(p) = ln(p(m)) - x2/2 - ln(sum_i(p(d|mi)p(mi)));
-        # fire extinguisher probability becomes -2 ln(f) = 32 for p_f ~ 1e-7
-        lnprobs_norm = np.log(np.sum(np.append(sn_priors*np.exp(-0.5 * x2s), 1e-7)))
+        # ln(p) = ln(p(m)) - x2/2 - ln(sum_i(p(d|mi)p(mi)))
+        lnprobs_norm = np.log(np.sum(np.append(sn_priors*np.exp(-0.5 * x2s), fire)))
         lnprob = np.log(sn_priors[type_ind]) - x2s[type_ind]/2 + lnprobs_norm
 
         if make_fit_figs:
-            probs = np.append(sn_priors*np.exp(-0.5 * x2s), 1e-7)
+            probs = np.append(sn_priors*np.exp(-0.5 * x2s), fire)
             probs /= np.sum(probs)
             sse.make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results,
                              bestfit_models, figtext)
-
-    return lnprob
+    if return_full:
+        probs = np.append(sn_priors*np.exp(-0.5 * x2s), fire)
+        probs /= np.sum(probs)
+        return [lnprob, probs, x2s]
+    else:
+        return lnprob
 
 
 @profile
-def run_filt_cadence_combo(directory, sn_types, filters, pixel_scale, exptime, filt_zp,
+def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp,
                            psf_comp_filename, dark_current, readnoise, t0, lambda_eff,
-                           make_sky_figs, make_fit_figs, make_flux_figs, image_flag,
-                           multi_z_fit, psf_r, t_interval, n_obs):
+                           make_sky_figs, make_fit_figs, make_flux_figs, image_flag, multi_z_fit,
+                           psf_r, return_full):
+    logexptime, t_interval, _n_obs = p
+    n_obs = int(np.rint(_n_obs))
+    exptime = np.exp(logexptime)
     # only consider sources out to ~100 days
     t_low, t_high = 0, (n_obs - 1) * t_interval
     times = np.arange(t_low, min(100, t_high)+1e-10, t_interval) + \
         np.random.uniform(-t_interval, t_interval)
-    if len(filters) * len(times) <= 5:
+    if len(filters) * len(times) <= 5 or exptime <= 0 or exptime >= 10000 or t_interval <= 0 or \
+            t_interval >= 30 or _n_obs <= 0 or _n_obs >= 30:
         return -np.inf
 
     type_ind = np.random.choice(len(sn_types))
@@ -587,8 +611,9 @@ def run_filt_cadence_combo(directory, sn_types, filters, pixel_scale, exptime, f
                        sn_types[type_ind], z_, t_))
         figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
 
-    lnprob = fit_lc(lc_data_table, sn_types, directory, filters, figtext, ncol, minsnr,
-                    sn_priors, filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params)
+    fit_lc_out = fit_lc(lc_data_table, sn_types, directory, filters, figtext, ncol, minsnr,
+                        sn_priors, filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params,
+                        return_full)
 
     if make_flux_figs:
         gs = gridcreate('09', 1, 1, 0.8, 5)
@@ -605,10 +630,7 @@ def run_filt_cadence_combo(directory, sn_types, filters, pixel_scale, exptime, f
         plt.tight_layout()
         plt.savefig('{}/flux_ratio.pdf'.format(directory))
 
-    # if we're fitting a true Ia then we want the probability to be high, otherwise it should
-    # be low; the probability is P(Ia|D) = P(Ia) * p(D|Ia) / sum_j P(j) p(D|j) or
-    # P(CC|D) = 1 - P(Ia|D)
-    return lnprob
+    return fit_lc_out
 
 
 if __name__ == '__main__':
@@ -643,9 +665,6 @@ if __name__ == '__main__':
     if len(glob.glob('{}/*.pdf'.format(directory))) > 0:
         os.system('rm {}/*.pdf'.format(directory))
 
-    t_intervals, n_obss = [20], [3]
-    sub_inds_combos = [[0, 3, 4]]
-
     dark = 0.015  # e/s/pixel
     psf_r = 3  # pixel
     snr_det = 5  # minimum SNR to consider a detection, given source and background noise
@@ -655,10 +674,28 @@ if __name__ == '__main__':
     #                 dark)
     # sys.exit()
 
-    make_sky_figs, make_fit_figs, make_flux_figs, image_flag = False, False, False, False
-    multi_z_fit, fit_cc = False, True
+    make_sky_figs, make_flux_figs, image_flag = False, False, False
+    make_fit_figs = True
+    multi_z_fit, fit_cc, return_full = False, True, False
 
-    exptime, t_interval, n_obs = 100, 20, 3
+    nchain = 5000
+
+    sub_inds_combos = [[0, 3, 4], [0, 1, 2, 3, 4, 5]]
+
+    # sub_inds = sub_inds_combos[1]
+    # filters = filters_master[sub_inds]
+    # filt_zp = filt_zp_master[sub_inds]
+    # colours = colours_master[sub_inds]
+    # lambda_eff = lambda_eff_master[sub_inds]
+    # args = (directory, sn_types, filters, pixel_scale, filt_zp, psf_comp_filename,
+    #         dark_current, readnoise, t0, lambda_eff, make_sky_figs, make_fit_figs,
+    #         make_flux_figs, image_flag, multi_z_fit, psf_r, return_full)
+    # p = [5, 10, 15]  # ln(exp), dt, nobs
+
+    # for _ in range(0, 50):
+    #     lnprob, probs, x2s = run_filt_cadence_combo(p, *args)
+    #     print(np.exp(lnprob), probs, x2s)
+    sys.exit()
 
     for sub_inds in sub_inds_combos:
 
@@ -666,13 +703,45 @@ if __name__ == '__main__':
         filt_zp = filt_zp_master[sub_inds]
         colours = colours_master[sub_inds]
         lambda_eff = lambda_eff_master[sub_inds]
+        args = (directory, sn_types, filters, pixel_scale, filt_zp, psf_comp_filename,
+                dark_current, readnoise, t0, lambda_eff, make_sky_figs, make_fit_figs,
+                make_flux_figs, image_flag, multi_z_fit, psf_r)
 
-        for _ in range(0, 50):
-            start = timeit.default_timer()
-            ln_prob = run_filt_cadence_combo(directory, sn_types, filters,
-                                             pixel_scale, exptime, filt_zp, psf_comp_filename,
-                                             dark_current, readnoise, t0, lambda_eff, make_sky_figs,
-                                             make_fit_figs, make_flux_figs, image_flag,
-                                             multi_z_fit, psf_r, t_interval, n_obs)
-            time = '{:.2f}s'.format(timeit.default_timer()-start)
-            print(np.exp(ln_prob), time)
+        subname = ''
+        for f in filters:
+            subname += f
+
+        nwalkers, ndim = 10, 3
+        pos = [4.5, 5, 3] + 1e-1*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
+
+        start = timeit.default_timer()
+        with Pool(10) as pool:
+            sampler = emcee.EnsembleSampler(nwalkers, ndim, run_filt_cadence_combo, args=args,
+                                            pool=pool)
+            sampler.run_mcmc(pos, nchain)
+        end = timeit.default_timer()
+
+        fig, axes = plt.subplots(3, figsize=(10, 7), sharex=True)
+        samples = sampler.chain
+        print(subname, 'shape: {}, acceptance fraction: {}, time: {:.2f}s'.format(samples.shape, sampler.acceptance_fraction, end-start))
+        labels = ["ln(t$_\mathrm{exp}$ / s)", "$\Delta$t$_\mathrm{int}$ / s", "n$_\mathrm{obs}$"]
+        for i in range(ndim):
+            ax = axes[i]
+            ax.plot(samples[:, :, i].T, "k", alpha=0.3)
+            ax.set_xlim(0, samples.shape[1])
+            ax.set_ylabel(labels[i])
+            ax.yaxis.set_label_coords(-0.1, 0.5)
+
+        axes[-1].set_xlabel("step number")
+        plt.tight_layout()
+        plt.savefig('{}/correlation_{}.pdf'.format(directory, subname))
+
+        flat_samples = sampler.chain[:, 100:, :].reshape((-1, ndim))
+        fig = corner.corner(flat_samples, labels=labels)
+        plt.savefig('{}/corner_{}.pdf'.format(directory, subname))
+
+        try:
+            tau = sampler.get_autocorr_time()
+            print(tau)
+        except emcee.autocorr.AutocorrError:
+            print('Chain too short to reliably calculate autocorrelation time')

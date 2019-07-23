@@ -6,6 +6,7 @@ import sn_sampling as sn
 import astropy.io.fits as pyfits
 import sncosmo
 import astropy.units as u
+import glob
 
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
@@ -79,11 +80,11 @@ def faintest_sn(sn_types, filters, filt_minmags, exptime, filt_zp, snr_det, psf_
             bkg = np.random.uniform(1, 3)
         else:
             bkg = np.random.uniform(0.3, 0.7)
-        # get f from S = f / sqrt(f/t + A) where A = D + B + R; D = (sqrt(dpt)/t)**2 = dp/t,
-        # B = (sqrt(bpt)/t)**2 = bp/t; R = (p[ * ndit] * ron / t)**2
-        R = np.pi * psf_r**2 * rnoise**2 / exptime**2
-        A = np.pi * psf_r**2 * (bkg + dark) / exptime + R
-        f = (snr_det**2 + np.sqrt(4 * A**2 * snr_det**2 * exptime**2 + snr_det**4)) / (2 * exptime)
+        # get f from S = c / sqrt(sqrt(c)**2 + A) where c = f*t; A = D + B + R;
+        # D = (sqrt(dpt))**2 = dpt, B = (sqrt(bpt))**2 = bpt; R = (p[ * ndit] * ron)**2
+        R = np.pi * psf_r**2 * rnoise**2
+        A = np.pi * psf_r**2 * (bkg + dark) * exptime + R
+        f = (snr_det**2 + np.sqrt(4 * A * snr_det**2 + snr_det**4)) / (2 * exptime)
         filt_minmags[i] = -2.5 * np.log10(f) + filt_zp[i]
     for sn_type in sn_types:
         sn_model = sn.get_sn_model(sn_type, 1)
@@ -187,4 +188,11 @@ def make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results
     fig = sncosmo.plot_lc(lc_data, model=bestfit_models, xfigsize=5*ncol, tighten_ylim=False,
                           ncol=ncol, figtext=figtext, figtextsize=ypad, model_label=sn_types)
     fig.tight_layout(rect=[0, 0.03, 1, 0.935])
-    fig.savefig('{}/fit.pdf'.format(directory))
+
+    files = glob.glob('{}/fit_*.pdf'.format(directory))
+    if len(files) == 0:
+        i = -1
+    else:
+        f = [int(f.split('_')[-1].split('.')[0]) for f in files]
+        i = np.amax(f)
+    fig.savefig('{}/fit_{}.pdf'.format(directory, i+1))
