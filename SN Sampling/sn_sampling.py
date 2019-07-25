@@ -584,7 +584,7 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
         dt = np.log10(np.abs(fit_params[1] - sn_params[1]))
         dt_sigt = np.log10(np.abs((fit_params[1] - sn_params[1]) / (fit_errors.get('t0') + 1e-50)))
         sign_dt = np.sign(fit_params[1] - sn_params[2])
-        da = np.log10(np.abs(fit_params[2] - sn_params[2]))
+        da = np.log10(np.abs((fit_params[2] - sn_params[2]) / sn_params[2]))
         if sn_types[type_ind] == 'Ia':
             da_siga = np.log10(np.abs((fit_params[2] - sn_params[2]) /
                                       (fit_errors.get('x0') + 1e-50)))
@@ -796,13 +796,14 @@ if __name__ == '__main__':
 
         logprob = np.log10(np.exp(sampler.lnprobability))[:, nburnin:].reshape((-1))
         params, names, axis_names, fracinds = [flat_blobs[:, 1], flat_blobs[:, 3],
-            flat_blobs[:, 5], flat_blobs[:, 0], flat_blobs[:, 2], flat_blobs[:, 4], logprob], \
+                                               flat_blobs[:, 5], flat_blobs[:, 0],
+                                               flat_blobs[:, 2], flat_blobs[:, 4], logprob], \
             ['z', 't0', 'A', 'z', 't0', 'A', 'p'], \
-            [r'log$_{{10}}$($|\Delta${}/$\sigma_\mathrm{{\Delta {}}}|$)',
-             r'log$_{{10}}$($|\Delta${}/$\sigma_\mathrm{{\Delta {}}}|$)',
-             r'log$_{{10}}$($|\Delta${}/$\sigma_\mathrm{{\Delta {}}}|$)',
-             r'log$_{{10}}$($|\Delta${}$|$)', r'log$_{{10}}$($|\Delta${}$|$)',
-             r'log$_{{10}}$($|\Delta${}$|$)', r'log$_{{10}}$(p)'], \
+            [r'log$_{{10}}$($|\Delta$z/$\sigma_\mathrm{{\Delta z}}|$)',
+             r'log$_{{10}}$($|\Delta$t0/$\sigma_\mathrm{{\Delta t0}}|$)',
+             r'log$_{{10}}$($|\Delta$A/$\sigma_\mathrm{{\Delta A}}|$)',
+             r'log$_{{10}}$($|\Delta$z$|$)', r'log$_{{10}}$($|\Delta$t0$|$)',
+             r'log$_{{10}}$($|\Delta$A/A$|$)', r'log$_{{10}}$(p)'], \
             [6, 7, 8, 6, 7, 8, 0]
         percentiles = [1, 16, 50, 84, 99]
         gs_outer = gridcreate('0', len(percentiles), len(names), 1, 5*ndim)
@@ -824,7 +825,7 @@ if __name__ == '__main__':
                     else:
                         ax.set_xticklabels([])
                     if i == 0:
-                        ax.set_ylabel(axis_name.format(name, name))
+                        ax.set_ylabel(axis_name)
                         if jj < len(names) - 1:
                             posfrac = np.sum(flat_blobs[:, fracind] == 1) / len(flat_blobs) * 100
                             negfrac = np.sum(flat_blobs[:, fracind] == -1) / len(flat_blobs) * 100
@@ -874,6 +875,6 @@ if __name__ == '__main__':
                     ax = plt.subplot(gs[0, ndim - 1], label=jj*3+ii*104+i*99)
                     cb = plt.colorbar(ScalarMappable(norm=norm, cmap='viridis'),
                                       cax=ax, ax=ax, use_gridspec=True, orientation='vertical')
-                    cb.set_label(axis_name.format(name, name))
+                    cb.set_label(axis_name)
         plt.tight_layout()
         plt.savefig('{}/{}_corner_fit.pdf'.format(directory, subname))
