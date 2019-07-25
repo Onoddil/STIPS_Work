@@ -19,6 +19,18 @@ def gridcreate(name, y, x, ratio, z, **kwargs):
     return gs
 
 
+def mcmc_runtime(sec_per_filt, n_filts):
+    t = 0
+    combo_tot = 0
+    for k in range(1, n_filts+1):
+        n_combos = np.math.factorial(n_filts) / np.math.factorial(k) / np.math.factorial(n_filts -
+                                                                                         k)
+        t += n_combos * sec_per_filt*k
+        combo_tot += n_combos
+    print("{} choices, {:.0f}/{:.0f}/{:.0f} approximate minutes/hours/days".format(
+        combo_tot, t/60, t/60/60, t/60/60/24))
+
+
 def make_figures(images_with_sn, images_without_sn, diff_images, filters, times, exptime):
     n = np.random.choice(len(times))
     # TODO: fix these times to include the randomness of the times given in run_cadence above

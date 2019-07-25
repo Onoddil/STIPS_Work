@@ -1,9 +1,11 @@
 import os
 import sys
 import matplotlib.gridspec as gridspec
+from matplotlib.cm import ScalarMappable
 import numpy as np
 import matplotlib.pyplot as plt
 
+from scipy.stats import binned_statistic, binned_statistic_2d
 from scipy.special import gammaincinv
 from astropy.table import Table
 import sncosmo
@@ -21,9 +23,13 @@ import galsim.wfirst as wfirst
 import sn_sampling_extras as sse
 import psf_mog_fitting as pmf
 
+from astropy.visualization import simple_norm
 import emcee
 import corner
 from multiprocessing import Pool
+
+import warnings
+os.environ["OMP_NUM_THREADS"] = "1"
 
 # things to add to detector to create accurate noise model:
 # sources, counting as poissonian noise
@@ -312,7 +318,8 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
             band_array.append(filters[j])
 
             x_cent, y_cent = (image.shape[0]-1)/2, (image.shape[1]-1)/2
-            xind, yind = np.floor(rand_ra / pixel_scale + x_cent).astype(int), np.floor(rand_dec / pixel_scale + y_cent).astype(int)
+            xind = np.floor(rand_ra / pixel_scale + x_cent).astype(int)
+            yind = np.floor(rand_dec / pixel_scale + y_cent).astype(int)
 
             N = 5
             delta = np.arange(-N, N+1e-10, 1)
@@ -392,9 +399,12 @@ def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, psf_r):
             # appropriate filter for the observation
             bandpass = sncosmo.get_bandpass(filters[j])
             # time should be in days
-            m_ia = sn_model.bandmag(bandpass, magsys='ab', time=time)
-            if np.isnan(m_ia):
-                m_ia = -2.5 * np.log10(0.01) + filt_zp[j]
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', message='divide by zero encountered in log10')
+                warnings.filterwarnings('ignore', message='invalid value encountered in log10')
+                m_ia = sn_model.bandmag(bandpass, magsys='ab', time=time)
+                if np.isnan(m_ia):
+                    m_ia = -2.5 * np.log10(0.01) + filt_zp[j]
 
             t_f = 10**(-1/2.5 * (m_ia - filt_zp[j]))
 
@@ -538,7 +548,6 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
             lnprob = np.log(prob)
         else:
             lnprob = -np.inf
-
         if make_fit_figs:
             sse.make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results,
                              bestfit_models, figtext)
@@ -546,8 +555,16 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
         # fit probability of injected model being returned
         # if this was p = p(m) * p(d|m) / p(d) = p(m) * p(d|m) / sum_i(p(d|mi)p(mi)) then
         # ln(p) = ln(p(m)) - x2/2 - ln(sum_i(p(d|mi)p(mi)))
-        lnprobs_norm = np.log(np.sum(np.append(sn_priors*np.exp(-0.5 * x2s), fire)))
-        lnprob = np.log(sn_priors[type_ind]) - x2s[type_ind]/2 + lnprobs_norm
+        sum_i = np.sum(np.append(sn_priors*np.exp(-0.5 * x2s), fire))
+        if sum_i > 0:
+            lnprobs_norm = np.log(sum_i)
+        else:
+            # if p(fire)*exp(-x2_f/2) has rounded to zero, and all fits are bad enough to be zero
+            # as well, then the normalisation for this fit can just be the log-fire probability,
+            # which we can handle in log space without issue, giving a very low normalisation for
+            # this fit
+            lnprobs_norm = -x2_f / 2 + np.log(fire_prior)
+        lnprob = np.log(sn_priors[type_ind]) - x2s[type_ind]/2 - lnprobs_norm
 
         if make_fit_figs:
             probs = np.append(sn_priors*np.exp(-0.5 * x2s), fire)
@@ -559,7 +576,23 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
         probs /= np.sum(probs)
         return [lnprob, probs, x2s]
     else:
-        return lnprob
+        fit_params = bestfit_models[type_ind].parameters
+        fit_errors = bestfit_results[type_ind].errors
+        dz = np.log10(np.abs(fit_params[0] - sn_params[0]))
+        dz_sigz = np.log10(np.abs((fit_params[0] - sn_params[0]) / (fit_errors.get('z') + 1e-50)))
+        sign_dz = np.sign(fit_params[0] - sn_params[0])
+        dt = np.log10(np.abs(fit_params[1] - sn_params[1]))
+        dt_sigt = np.log10(np.abs((fit_params[1] - sn_params[1]) / (fit_errors.get('t0') + 1e-50)))
+        sign_dt = np.sign(fit_params[1] - sn_params[2])
+        da = np.log10(np.abs(fit_params[2] - sn_params[2]))
+        if sn_types[type_ind] == 'Ia':
+            da_siga = np.log10(np.abs((fit_params[2] - sn_params[2]) /
+                                      (fit_errors.get('x0') + 1e-50)))
+        else:
+            da_siga = np.log10(np.abs((fit_params[2] - sn_params[2]) /
+                                      (fit_errors.get('amplitude') + 1e-50)))
+        sign_da = np.sign(fit_params[2] - sn_params[2])
+        return lnprob, [dz, dz_sigz, dt, dt_sigt, da, da_siga, sign_dz, sign_dt, sign_da]
 
 
 @profile
@@ -569,14 +602,14 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
                            psf_r, return_full):
     logexptime, t_interval, _n_obs = p
     n_obs = int(np.rint(_n_obs))
-    exptime = np.exp(logexptime)
+    exptime = 10**logexptime
     # only consider sources out to ~100 days
     t_low, t_high = 0, (n_obs - 1) * t_interval
     times = np.arange(t_low, min(100, t_high)+1e-10, t_interval) + \
         np.random.uniform(-t_interval, t_interval)
     if len(filters) * len(times) <= 5 or exptime <= 0 or exptime >= 10000 or t_interval <= 0 or \
             t_interval >= 30 or _n_obs <= 0 or _n_obs >= 30:
-        return -np.inf
+        return -np.inf, [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan]
 
     type_ind = np.random.choice(len(sn_types))
     if image_flag:
@@ -594,7 +627,7 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
     lc_data_table = Table(data=lc_data,
                           names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
     if not np.amax(lc_data_table['flux'].data / lc_data_table['fluxerr'].data) >= minsnr:
-        return -np.inf
+        return -np.inf, [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan]
 
     figtext = []
     if sn_types[type_ind] == 'Ia':
@@ -630,10 +663,16 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
         plt.tight_layout()
         plt.savefig('{}/flux_ratio.pdf'.format(directory))
 
-    return fit_lc_out
+    if return_full:
+        return fit_lc_out
+    else:
+        lnprob, blob = fit_lc_out
+        return lnprob, blob
 
 
 if __name__ == '__main__':
+    # sec_per_filt, nfilts = 5000, 6
+    # sse.mcmc_runtime(sec_per_filt, nfilts)
     # run_mins = 20/60
     # sse.model_number(run_mins, ngals)
 
@@ -675,12 +714,10 @@ if __name__ == '__main__':
     # sys.exit()
 
     make_sky_figs, make_flux_figs, image_flag = False, False, False
-    make_fit_figs = True
-    multi_z_fit, fit_cc, return_full = False, True, False
+    make_fit_figs = False
+    multi_z_fit, fit_cc, return_full = False, False, False
 
-    nchain = 5000
-
-    sub_inds_combos = [[0, 3, 4], [0, 1, 2, 3, 4, 5]]
+    sub_inds_combos = [[2], [0, 3, 4], [0, 1, 2, 3, 4, 5]]
 
     # sub_inds = sub_inds_combos[1]
     # filters = filters_master[sub_inds]
@@ -690,58 +727,153 @@ if __name__ == '__main__':
     # args = (directory, sn_types, filters, pixel_scale, filt_zp, psf_comp_filename,
     #         dark_current, readnoise, t0, lambda_eff, make_sky_figs, make_fit_figs,
     #         make_flux_figs, image_flag, multi_z_fit, psf_r, return_full)
-    # p = [5, 10, 15]  # ln(exp), dt, nobs
+    # p = [2.5, 10, 15]  # log10(exp), dt, nobs
 
     # for _ in range(0, 50):
     #     lnprob, probs, x2s = run_filt_cadence_combo(p, *args)
     #     print(np.exp(lnprob), probs, x2s)
-    sys.exit()
+    # sys.exit()
+
+    nchain = 5000
+    nburnin = 200
 
     for sub_inds in sub_inds_combos:
-
         filters = filters_master[sub_inds]
         filt_zp = filt_zp_master[sub_inds]
         colours = colours_master[sub_inds]
         lambda_eff = lambda_eff_master[sub_inds]
         args = (directory, sn_types, filters, pixel_scale, filt_zp, psf_comp_filename,
                 dark_current, readnoise, t0, lambda_eff, make_sky_figs, make_fit_figs,
-                make_flux_figs, image_flag, multi_z_fit, psf_r)
+                make_flux_figs, image_flag, multi_z_fit, psf_r, return_full)
 
         subname = ''
         for f in filters:
             subname += f
 
         nwalkers, ndim = 10, 3
-        pos = [4.5, 5, 3] + 1e-1*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
+        pos = [2.5, 5, 10] + 1e-1*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
 
         start = timeit.default_timer()
-        with Pool(10) as pool:
-            sampler = emcee.EnsembleSampler(nwalkers, ndim, run_filt_cadence_combo, args=args,
-                                            pool=pool)
-            sampler.run_mcmc(pos, nchain)
+        pool = Pool(10)
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, run_filt_cadence_combo, args=args,
+                                        pool=pool)
+        sampler.run_mcmc(pos, nchain)
+        pool.close()
         end = timeit.default_timer()
 
         fig, axes = plt.subplots(3, figsize=(10, 7), sharex=True)
         samples = sampler.chain
-        print(subname, 'shape: {}, acceptance fraction: {}, time: {:.2f}s'.format(samples.shape, sampler.acceptance_fraction, end-start))
-        labels = ["ln(t$_\mathrm{exp}$ / s)", "$\Delta$t$_\mathrm{int}$ / s", "n$_\mathrm{obs}$"]
+        print(subname, 'shape: {}, acceptance fraction: {}, time: {:.2f}s'.format(samples.shape,
+              sampler.acceptance_fraction, end-start))
+        print('Probability distribution:', np.percentile(np.exp(sampler.lnprobability),
+                                                         [0, 10, 16, 25, 50, 75, 84, 90, 100]))
+        labels = [r"log$_{10}$(t$_\mathrm{exp}$ / s)", r"$\Delta$t$_\mathrm{int}$ / day",
+                  r"n$_\mathrm{obs}$"]
         for i in range(ndim):
             ax = axes[i]
             ax.plot(samples[:, :, i].T, "k", alpha=0.3)
             ax.set_xlim(0, samples.shape[1])
             ax.set_ylabel(labels[i])
             ax.yaxis.set_label_coords(-0.1, 0.5)
+            ax.axvline(nburnin, ls='--', c='k')
 
         axes[-1].set_xlabel("step number")
         plt.tight_layout()
-        plt.savefig('{}/correlation_{}.pdf'.format(directory, subname))
+        plt.savefig('{}/{}_correlation.pdf'.format(directory, subname))
 
-        flat_samples = sampler.chain[:, 100:, :].reshape((-1, ndim))
+        flat_samples = sampler.chain[:, nburnin:, :].reshape((-1, ndim))
+        # blobs is iterations, nwalkers while chain is nwalkers, iterations, ndim, so swap axes 0+1
+        # remembering to reshape by the number of blob items returned for each lnprob
+        flat_blobs = np.array(sampler.blobs[nburnin:]).swapaxes(0, 1).reshape(-1, 9)
         fig = corner.corner(flat_samples, labels=labels)
-        plt.savefig('{}/corner_{}.pdf'.format(directory, subname))
+        plt.savefig('{}/{}_corner_pdf.pdf'.format(directory, subname))
 
         try:
             tau = sampler.get_autocorr_time()
             print(tau)
         except emcee.autocorr.AutocorrError:
             print('Chain too short to reliably calculate autocorrelation time')
+
+        logprob = np.log10(np.exp(sampler.lnprobability))[:, nburnin:].reshape((-1))
+        params, names, axis_names, fracinds = [flat_blobs[:, 1], flat_blobs[:, 3],
+            flat_blobs[:, 5], flat_blobs[:, 0], flat_blobs[:, 2], flat_blobs[:, 4], logprob], \
+            ['z', 't0', 'A', 'z', 't0', 'A', 'p'], \
+            [r'log$_{{10}}$($|\Delta${}/$\sigma_\mathrm{{\Delta {}}}|$)',
+             r'log$_{{10}}$($|\Delta${}/$\sigma_\mathrm{{\Delta {}}}|$)',
+             r'log$_{{10}}$($|\Delta${}/$\sigma_\mathrm{{\Delta {}}}|$)',
+             r'log$_{{10}}$($|\Delta${}$|$)', r'log$_{{10}}$($|\Delta${}$|$)',
+             r'log$_{{10}}$($|\Delta${}$|$)', r'log$_{{10}}$(p)'], \
+            [6, 7, 8, 6, 7, 8, 0]
+        percentiles = [1, 16, 50, 84, 99]
+        gs_outer = gridcreate('0', len(percentiles), len(names), 1, 5*ndim)
+        for jj, (param, name, axis_name, fracind) in enumerate(zip(params, names,
+                                                                   axis_names, fracinds)):
+            norm = simple_norm(param, 'linear', max_cut=np.nanpercentile(param, 99), min_cut=-10)
+            for ii, percentile in enumerate(percentiles):
+                gs = gridspec.GridSpecFromSubplotSpec(ndim, ndim, subplot_spec=gs_outer[ii, jj],
+                                                      hspace=0, wspace=0)
+                for i in range(0, ndim):
+                    hist, bins, _ = binned_statistic(flat_samples[:, i], param,
+                                                     statistic=lambda x: np.nanpercentile(x,
+                                                     percentile), bins=20)
+                    ax = plt.subplot(gs[i, i], label=jj*2+ii*3+i*5)
+                    ax.plot(bins, np.append(hist, hist[-1]), ls='-', c='k', drawstyle='steps-post')
+                    if i == ndim - 1:
+                        ax.set_xlabel(labels[i])
+                        ax.set_xlim(bins[0], bins[-1])
+                    else:
+                        ax.set_xticklabels([])
+                    if i == 0:
+                        ax.set_ylabel(axis_name.format(name, name))
+                        if jj < len(names) - 1:
+                            posfrac = np.sum(flat_blobs[:, fracind] == 1) / len(flat_blobs) * 100
+                            negfrac = np.sum(flat_blobs[:, fracind] == -1) / len(flat_blobs) * 100
+                            if ndim > 1:
+                                ax.set_title(r'Overall sign: +ve {:.0f}\%, -ve: {:.0f}\%'.format(
+                                    posfrac, negfrac))
+                            else:
+                                ax.set_title(name + '\n' +
+                                             r'Overall sign: +ve {:.0f}\%, -ve: {:.0f}\%'
+                                             .format(posfrac, negfrac))
+                        else:
+                            if ndim == 1:
+                                ax.set_title(name)
+                    ax.yaxis.tick_right()
+                    for j in range(0, ndim):
+                        if j >= i:
+                            if ii == 0 and i == 0 and j == np.floor((ndim - 1) / 2) and ndim > 1:
+                                ax = plt.subplot(gs[i, j], label=jj*3+ii*1+i*2+j*3)
+                                ax.set_frame_on(False)
+                                ax.set_xticks([])
+                                ax.set_yticks([])
+                                ax.set_title(name)
+                            continue
+                        ax = plt.subplot(gs[i, j], label=jj*30+ii*38+i*4+j*7)
+                        hist, ybins, xbins, _ = binned_statistic_2d(flat_samples[:, i],
+                                                                    flat_samples[:, j],
+                                                                    param, statistic=lambda x:
+                                                                    np.nanpercentile(x,
+                                                                    percentile), bins=20)
+                        img = ax.pcolormesh(xbins, ybins, hist, norm=norm, cmap='viridis',
+                                            edgecolors='face', shading='flat')
+                        if i == ndim - 1:
+                            ax.set_xlabel(labels[j])
+                        else:
+                            ax.set_xticklabels([])
+                        if j == 0:
+                            if jj == 0 and i == np.floor((ndim - 1) / 2):
+                                ending = ('st' if percentile % 10 == 1 else 'nd' if percentile %
+                                          10 == 2 else 'th')
+                                ax.set_ylabel(r'{}$^\mathrm{{{}}}$ percentile'.format(percentile,
+                                              ending) + '\n' + labels[i])
+                            else:
+                                ax.set_ylabel(labels[i])
+                        else:
+                            ax.set_yticklabels([])
+                if ndim > 1:
+                    ax = plt.subplot(gs[0, ndim - 1], label=jj*3+ii*104+i*99)
+                    cb = plt.colorbar(ScalarMappable(norm=norm, cmap='viridis'),
+                                      cax=ax, ax=ax, use_gridspec=True, orientation='vertical')
+                    cb.set_label(axis_name.format(name, name))
+        plt.tight_layout()
+        plt.savefig('{}/{}_corner_fit.pdf'.format(directory, subname))
