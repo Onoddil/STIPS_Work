@@ -12,6 +12,8 @@
 *.tmp
 .DS_Store
 */.DS_Store
+._.DS_Store
+*/._.DS_Store
 !salt2-guy2010-parameters.txt
 */*.lprof
 */._*

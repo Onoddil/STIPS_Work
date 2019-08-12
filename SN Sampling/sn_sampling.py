@@ -704,6 +704,8 @@ if __name__ == '__main__':
         os.makedirs(directory)
     if not os.path.exists('{}/savefiles'.format(directory)) and not load:
         os.makedirs('{}/savefiles'.format(directory))
+    if load and len(glob.glob('{}/savefiles/*.npy')[0]) != 5:
+        load = False
     psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
 
     filters_master = np.array(['z087', 'y106', 'w149', 'j129', 'h158', 'f184'])  # 'r062'
@@ -775,19 +777,40 @@ if __name__ == '__main__':
             nwalkers, ndim = 12, 3
             pos = [2.5, 60, 2] + 1e-1*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
 
-            start = timeit.default_timer()
-            pool = Pool(10)
-            sampler = emcee.EnsembleSampler(nwalkers, ndim, run_filt_cadence_combo, args=args,
-                                            pool=pool)
-            sampler.run_mcmc(pos, nchain)
-            pool.close()
-            end = timeit.default_timer()
+            if not load:
+                pass
+                start = timeit.default_timer()
+                pool = Pool(10)
+                sampler = emcee.EnsembleSampler(nwalkers, ndim, run_filt_cadence_combo, args=args,
+                                                pool=pool)
+                sampler.run_mcmc(pos, nchain)
+                pool.close()
+                end = timeit.default_timer()
+                samples = sampler.chain
+                flat_samples = sampler.chain[:, nburnin:, :].reshape((-1, ndim))
+                # blobs is iterations, nwalkers while chain is nwalkers, iterations, ndim, so swap
+                # axes 0+1 remembering to reshape by number of blob items returned for each lnprob
+                flat_blobs = np.array(sampler.blobs[nburnin:]).swapaxes(0, 1).reshape(-1, 9)
+                lnprob = sampler.lnprobability
+                sampler_acceptance_fraction = sampler.acceptance_fraction
+                time = end-start
+                try:
+                    tau = sampler.get_autocorr_time()
+                except emcee.autocorr.AutocorrError:
+                    tau = 'Cannot reliably calculate autocorrelation time'
+            else:
+                flat_blobs = np.load('{}/savefiles/{}_flatblobs.npy'.format(directory, subname))
+                lnprob = np.load('{}/savefiles/{}_lnprob.npy'.format(directory, subname))
+                flat_samples = np.load('{}/savefiles/{}_flatsamples.npy'.format(directory,
+                                                                                subname))
+                sampler_acceptance_fraction, time, tau = np.load('{}/savefiles/{}_misc.npy'.format(
+                    directory, subname), allow_pickle=True)
+                samples = np.load('{}/savefiles/{}_samples.npy'.format(directory, subname))
 
             fig, axes = plt.subplots(3, figsize=(10, 7), sharex=True)
-            samples = sampler.chain
             print(subname, 'shape: {}, acceptance fraction: {}, time: {:.2f}s'.format(
-                  samples.shape, sampler.acceptance_fraction, end-start))
-            print('Probability distribution:', np.percentile(np.exp(sampler.lnprobability),
+                  samples.shape, sampler_acceptance_fraction, time))
+            print('Probability distribution:', np.percentile(np.exp(lnprob),
                                                              [0, 10, 16, 25, 50, 75, 84, 90, 100]))
             labels = [r"log$_{10}$(t$_\mathrm{exp}$ / s)", r"$\Delta$t$_\mathrm{int}$ / day",
                       r"n$_\mathrm{obs}$"]
@@ -803,27 +826,21 @@ if __name__ == '__main__':
             plt.tight_layout()
             plt.savefig('{}/{}_correlation.pdf'.format(directory, subname))
 
-            flat_samples = sampler.chain[:, nburnin:, :].reshape((-1, ndim))
-            # blobs is iterations, nwalkers while chain is nwalkers, iterations, ndim, so swap
-            # axes 0+1 remembering to reshape by the number of blob items returned for each lnprob
-            flat_blobs = np.array(sampler.blobs[nburnin:]).swapaxes(0, 1).reshape(-1, 9)
             fig = corner.corner(flat_samples, labels=labels)
             plt.savefig('{}/{}_corner_pdf.pdf'.format(directory, subname))
 
-            try:
-                tau = sampler.get_autocorr_time()
-                print(tau)
-            except emcee.autocorr.AutocorrError:
-                print('Chain too short to reliably calculate autocorrelation time')
+            print(tau)
 
-            logprob = np.log10(np.exp(sampler.lnprobability))[:, nburnin:].reshape((-1))
+            logprob = np.log10(np.exp(lnprob))[:, nburnin:].reshape((-1))
             params = [flat_blobs[:, 1], flat_blobs[:, 3], flat_blobs[:, 5], flat_blobs[:, 0],
                       flat_blobs[:, 2], flat_blobs[:, 4], logprob]
 
             if not load:
-                np.save('{}/savefiles/{}_flatblobs.npy', flat_blobs)
-                np.save('{}/savefiles/{}_logprob.npy', logprob)
-                np.save('{}/savefiles/{}_flatsamples.npy', flat_samples)
+                np.save('{}/savefiles/{}_flatblobs.npy'.format(directory, subname), flat_blobs)
+                np.save('{}/savefiles/{}_lnprob.npy'.format(directory, subname), lnprob)
+                np.save('{}/savefiles/{}_flatsamples.npy'.format(directory, subname), flat_samples)
+                np.save('{}/savefiles/{}_misc.npy'.format(directory, subname), np.array([sampler_acceptance_fraction, time, tau]))  # have to allow_pickle=True to load this
+                np.save('{}/savefiles/{}_samples.npy'.format(directory, subname), samples)
 
             sse.make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fracinds,
                                          flat_samples, flat_blobs, labels, directory, subname)
