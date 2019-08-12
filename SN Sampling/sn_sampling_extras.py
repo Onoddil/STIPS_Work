@@ -7,6 +7,8 @@ import astropy.io.fits as pyfits
 import sncosmo
 import astropy.units as u
 import glob
+from scipy.stats import binned_statistic, binned_statistic_2d
+from matplotlib.cm import ScalarMappable
 
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
@@ -136,19 +138,20 @@ def register_filters(filters):
         sncosmo.register(bandpass)
 
 
-def get_sn_priors():
-    # priors on supernovae types: very roughly, these are the relative fractions of each type in
-    # the universe, to set the relative likelihoods of the observations with no information; these
-    # should follow sn_types as [Ia, Ib, Ic, II]. Boissier & prantzos 2009 quote, roughly and
-    # drawn by eye: Ibc/II ~ 0.3, Ic/Ib ~ 1.25, Ia/CC ~ 0.25. Hakobyan 2014, table 8, give:
-    NiaNcc, NibcNii, NicNib = 0.44, 0.36, 2.12
-    # given a/b=x we get a = x/(1+x) and b = 1/(1+x) = 1 - x/(1+x), so we can convert these to
-    # relative fractions:
-    fia, fcc = NiaNcc / (1 + NiaNcc), 1 - NiaNcc / (1 + NiaNcc)
-    fibc, fii = fcc * NibcNii / (1 + NibcNii), fcc * (1 - NibcNii / (1 + NibcNii))
-    fib, fic = fibc * (1 - NicNib / (1 + NicNib)), fibc * NicNib / (1 + NicNib)
-    sn_priors = np.array([fia, fib, fic, fii])
-    return sn_priors
+def get_sn_priors(kind='reduced'):
+    # li et al., 2011, mnras, 412, 1441 give:
+    # Ia 0.24, Ibc 0.19, II 0.57; Ib 0.21 Ic 0.54
+    if kind == 'reduced':
+        # Ia 0.24, II 0.57 Ibc 0.19; Ib 0.21 Ic 0.54; Ib = 0.19*0.21/0.75 = 0.053, Ic = 0.19*0.54/0.75 = 0.137
+        return np.array([0.24, 0.053, 0.137, 0.57])
+    else:
+        # IIP 0.7, IIL 0.1, IIn 0.09; Ia 0.7 Ia91T 0.09 Ia91bg 0.15, and thus:
+        # fia = 0.24*0.7/0.94 ~ 0.179, fiat = 0.24*0.09/0.94 ~ 0.022,
+        # fiabg = 0.24*0.15/0.94 ~ 0.038,
+        # fib = 0.19*0.21/(0.21+0.54) ~ 0.053, fic = 0.19*0.54/(0.21+0.54) ~ 0.137,
+        # fiip = 0.57*0.69/0.88 ~ 0.447, fiil = 0.57*0.1/0.88 ~ 0.065,
+        # fiin = 0.57*0.09/0.88 ~ 0.058, ignoring 'peculiar' Ibc and IIbs
+        return np.array([0.179, 0.022, 0.038, 0.053, 0.137, 0.447, 0.065, 0.058])
 
 
 def make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results, bestfit_models,
@@ -208,3 +211,85 @@ def make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results
         f = [int(f.split('_')[-1].split('.')[0]) for f in files]
         i = np.amax(f)
     fig.savefig('{}/fit_{}.pdf'.format(directory, i+1))
+
+
+def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fracinds, flat_samples,
+                             flat_blobs, labels, directory, subname):
+    gs_outer = gridcreate('0', len(percentiles), len(names), 1, 5*ndim)
+    for jj, (param, name, axis_name, fracind) in enumerate(zip(params, names,
+                                                               axis_names, fracinds)):
+        for ii, percentile in enumerate(percentiles):
+            gs = gridspec.GridSpecFromSubplotSpec(ndim, ndim*3, subplot_spec=gs_outer[ii, jj],
+                                                  hspace=0, wspace=0)
+            for i in range(0, ndim):
+                hist, bins, _ = binned_statistic(flat_samples[:, i], param,
+                                                 statistic=lambda x: np.nanpercentile(x,
+                                                 percentile), bins=20)
+                ax = plt.subplot(gs[i, 3*i:3*i+3], label=jj*2+ii*3+i*5)
+                ax.plot(bins, np.append(hist, hist[-1]), ls='-', c='k', drawstyle='steps-post')
+                if i == ndim - 1:
+                    ax.set_xlabel(labels[i])
+                    ax.set_xlim(bins[0], bins[-1])
+                else:
+                    ax.set_xticklabels([])
+                if i == 0:
+                    ax.set_ylabel(axis_name)
+                    if jj < len(names) - 1:
+                        posfrac = np.sum(flat_blobs[:, fracind] == 1) / len(flat_blobs) * 100
+                        negfrac = np.sum(flat_blobs[:, fracind] == -1) / len(flat_blobs) * 100
+                        if ndim > 1:
+                            ax.set_title(r'Overall sign: +ve {:.0f}%, -ve: {:.0f}%'.format(
+                                posfrac, negfrac))
+                        else:
+                            ax.set_title(name + '\n' +
+                                         r'Overall sign: +ve {:.0f}%, -ve: {:.0f}%'
+                                         .format(posfrac, negfrac))
+                    else:
+                        if ndim == 1:
+                            ax.set_title(name)
+                ax.yaxis.tick_right()
+                for j in range(0, ndim):
+                    if j >= i:
+                        if ii == 0 and i == 0 and j == np.floor((ndim - 1) / 2) and ndim > 1:
+                            ax = plt.subplot(gs[i, 3*j:3*j+3], label=jj*3+ii*1+i*2+j*3)
+                            ax.set_frame_on(False)
+                            ax.set_xticks([])
+                            ax.set_yticks([])
+                            ax.set_title(name)
+                        continue
+                    ax = plt.subplot(gs[i, 3*j:3*j+3], label=jj*30+ii*38+i*4+j*7)
+                    hist, ybins, xbins, _ = binned_statistic_2d(flat_samples[:, i],
+                                                                flat_samples[:, j],
+                                                                param, statistic=lambda x:
+                                                                np.nanpercentile(x,
+                                                                percentile), bins=20)
+                    _hist = np.ma.array(hist, mask=np.isnan(hist))
+
+                    cmap = plt.get_cmap('viridis')
+                    cmap.set_bad(color='r', alpha=1)
+
+                    norm = simple_norm(hist, 'linear', max_cut=np.nanpercentile(hist, 99),
+                                       min_cut=max(np.nanpercentile(hist, 1), -10), clip=False)
+                    ax.pcolormesh(xbins, ybins, _hist, norm=norm, cmap=cmap,
+                                  edgecolors='face', shading='flat')
+                    if i == ndim - 1:
+                        ax.set_xlabel(labels[j])
+                    else:
+                        ax.set_xticklabels([])
+                    if j == 0:
+                        if jj == 0 and i == np.floor((ndim - 1) / 2):
+                            ending = ('st' if percentile % 10 == 1 else 'nd' if percentile %
+                                      10 == 2 else 'th')
+                            ax.set_ylabel(r'{}$^\mathrm{{{}}}$ percentile'.format(percentile,
+                                          ending) + '\n' + labels[i])
+                        else:
+                            ax.set_ylabel(labels[i])
+                    else:
+                        ax.set_yticklabels([])
+            if ndim > 1:
+                ax = plt.subplot(gs[0, -2], label=jj*3+ii*104+i*99)
+                cb = plt.colorbar(ScalarMappable(norm=norm, cmap='viridis'),
+                                  cax=ax, ax=ax, use_gridspec=True, orientation='vertical')
+                cb.set_label(axis_name)
+    plt.tight_layout()
+    plt.savefig('{}/{}_corner_fit.pdf'.format(directory, subname))
