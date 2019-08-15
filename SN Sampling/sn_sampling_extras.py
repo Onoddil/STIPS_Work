@@ -9,6 +9,7 @@ import astropy.units as u
 import glob
 from scipy.stats import binned_statistic, binned_statistic_2d
 from matplotlib.cm import ScalarMappable
+from scipy.special import erfinv
 
 
 def gridcreate(name, y, x, ratio, z, **kwargs):
@@ -105,7 +106,8 @@ def faintest_sn(sn_types, filters, filt_minmags, exptime, filt_zp, snr_det, psf_
         for filt, filt_minmag in zip(filters, filt_minmags):
             z = 0
             sn_model.set(z=z)
-            while sn_model.bandoverlap(filt) and sn_model.bandmag(filt, 'ab', sn_model.source.peakphase(filt)) < filt_minmag:
+            while (sn_model.bandoverlap(filt) and sn_model.bandmag(filt, 'ab',
+                   sn_model.source.peakphase(filt)) < filt_minmag):
                 sn_model.set(z=z)
                 z += 0.01
             if sn_model.bandoverlap(filt):
@@ -142,7 +144,8 @@ def get_sn_priors(kind='reduced'):
     # li et al., 2011, mnras, 412, 1441 give:
     # Ia 0.24, Ibc 0.19, II 0.57; Ib 0.21 Ic 0.54
     if kind == 'reduced':
-        # Ia 0.24, II 0.57 Ibc 0.19; Ib 0.21 Ic 0.54; Ib = 0.19*0.21/0.75 = 0.053, Ic = 0.19*0.54/0.75 = 0.137
+        # Ia 0.24, II 0.57 Ibc 0.19; Ib 0.21 Ic 0.54; Ib = 0.19*0.21/0.75 = 0.053,
+        # Ic = 0.19*0.54/0.75 = 0.137
         return np.array([0.24, 0.053, 0.137, 0.57])
     else:
         # IIP 0.7, IIL 0.1, IIn 0.09; Ia 0.7 Ia91T 0.09 Ia91bg 0.15, and thus:
@@ -164,42 +167,24 @@ def make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results
                best_r.ndof, best_x2/best_r.ndof)]
     errors = best_r.errors
     model_params = best_m.parameters
-    if sn_types[best_ind] == 'Ia':
-        z_format = sncosmo.utils.format_value(model_params[0], errors.get('z'), latex=True)
-        t0_format = sncosmo.utils.format_value(model_params[1], errors.get('t0'), latex=True)
-        x0_format = sncosmo.utils.format_value(model_params[2], errors.get('x0'), latex=True)
-        x1_format = sncosmo.utils.format_value(model_params[3], errors.get('x1'), latex=True)
-        c_format = sncosmo.utils.format_value(model_params[4], errors.get('c'), latex=True)
-        figtext.append('Type {}: $z = {}$\n$t_0 = {}$\n$x_0 = {}$'.format(sn_types[best_ind],
-                       z_format, t0_format, x0_format))
-        if probs[0] > 0:
-            p_sig = int(np.floor(np.log10(abs(probs[0]))))
-        else:
-            p_sig = 0
-        if p_sig > 3:
-            figtext.append('$x_1 = {}$\n$c = {}$\n$P(Ia|D) = {:.3f} \\times 10^{}$'.format(
-                           x1_format, c_format, probs[0]/10**p_sig, p_sig))
-        else:
-            figtext.append('$x_1 = {}$\n$c = {}$\n$P(Ia|D) = {:.3f}$'.format(x1_format,
-                           c_format, probs[0]))
-    else:
-        z_format = sncosmo.utils.format_value(model_params[0], errors.get('z'), latex=True)
-        t0_format = sncosmo.utils.format_value(model_params[1], errors.get('t0'), latex=True)
-        A_format = sncosmo.utils.format_value(model_params[2], errors.get('amplitude'),
-                                              latex=True)
-        figtext.append('Type {}: $z = {}$\n$t_0 = {}$'.format(sn_types[best_ind],
-                       z_format, t0_format))
-        if probs[0] > 0:
-            p_sig = int(np.floor(np.log10(abs(probs[0]))))
-        else:
-            p_sig = 0
-        if p_sig > 3:
-            figtext.append('$A = {}$\n$P(Ia|D) = {:.3f} \\times 10^{{{}}}$'.format(
-                A_format, probs[0]/10**p_sig, p_sig))
-        else:
-            figtext.append('$A = {}$\n$P(Ia|D) = {:.3f}$'.format(A_format, probs[0]))
 
-    ypad = 4 if sn_types[best_ind] == 'Ia' else 2
+    z_format = sncosmo.utils.format_value(model_params[0], errors.get('z'), latex=True)
+    t0_format = sncosmo.utils.format_value(model_params[1], errors.get('t0'), latex=True)
+    A_format = sncosmo.utils.format_value(model_params[2], errors.get('amplitude'),
+                                          latex=True)
+    figtext.append('Type {}: $z = {}$\n$t_0 = {}$'.format(sn_types[best_ind],
+                   z_format, t0_format))
+    if probs[0] > 0:
+        p_sig = int(np.floor(np.log10(abs(probs[0]))))
+    else:
+        p_sig = 0
+    if p_sig > 3:
+        figtext.append('$A = {}$\n$P(Ia|D) = {:.3f} \\times 10^{{{}}}$'.format(
+            A_format, probs[0]/10**p_sig, p_sig))
+    else:
+        figtext.append('$A = {}$\n$P(Ia|D) = {:.3f}$'.format(A_format, probs[0]))
+
+    ypad = 2
     fig = sncosmo.plot_lc(lc_data, model=bestfit_models, xfigsize=5*ncol, tighten_ylim=False,
                           ncol=ncol, figtext=figtext, figtextsize=ypad, model_label=sn_types)
     fig.tight_layout(rect=[0, 0.03, 1, 0.935])
@@ -214,8 +199,9 @@ def make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results
 
 
 def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fracinds, flat_samples,
-                             flat_blobs, labels, directory, subname):
-    gs_outer = gridcreate('0', len(percentiles), len(names), 1, 5*ndim)
+                             flat_blobs, labels, directory, subname, min_1d_count, min_2d_count,
+                             max_interval, min_offset, max_offset):
+    gs_outer = gridcreate('0', len(percentiles), len(names), 1, 4*ndim)
     for jj, (param, name, axis_name, fracind) in enumerate(zip(params, names,
                                                                axis_names, fracinds)):
         for ii, percentile in enumerate(percentiles):
@@ -225,6 +211,10 @@ def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fraci
                 hist, bins, _ = binned_statistic(flat_samples[:, i], param,
                                                  statistic=lambda x: np.nanpercentile(x,
                                                  percentile), bins=20)
+                count, _, _ = binned_statistic(flat_samples[:, i], param,
+                                               statistic='count', bins=bins)
+                hist[count < min_1d_count] = np.nan
+
                 ax = plt.subplot(gs[i, 3*i:3*i+3], label=jj*2+ii*3+i*5)
                 ax.plot(bins, np.append(hist, hist[-1]), ls='-', c='k', drawstyle='steps-post')
                 if i == ndim - 1:
@@ -234,7 +224,7 @@ def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fraci
                     ax.set_xticklabels([])
                 if i == 0:
                     ax.set_ylabel(axis_name)
-                    if jj < len(names) - 1:
+                    if jj < len(names) - 4:
                         posfrac = np.sum(flat_blobs[:, fracind] == 1) / len(flat_blobs) * 100
                         negfrac = np.sum(flat_blobs[:, fracind] == -1) / len(flat_blobs) * 100
                         if ndim > 1:
@@ -242,11 +232,17 @@ def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fraci
                                 posfrac, negfrac))
                         else:
                             ax.set_title(name + '\n' +
-                                         r'Overall sign: +ve {:.0f}%, -ve: {:.0f}%'
-                                         .format(posfrac, negfrac))
+                                         r'Overall sign: +ve {:.0f}%, -ve: {:.0f}%' + '\n' +
+                                         r'log$_{{10}}$(1D gaussian CDF): {:.2f})'
+                                         .format(posfrac, negfrac,
+                                                 np.log10(np.sqrt(2) * erfinv(percentile/100))))
                     else:
                         if ndim == 1:
                             ax.set_title(name)
+                if i == 1 and jj < 3:  # just the first 3 variables, normalised by uncertainty
+                    ax.set_title(r'log$_{{10}}$(1D gaussian CDF): {:.2f}'.format(
+                                 np.log10(np.sqrt(2) * erfinv(percentile/100))))
+
                 ax.yaxis.tick_right()
                 for j in range(0, ndim):
                     if j >= i:
@@ -263,6 +259,10 @@ def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fraci
                                                                 param, statistic=lambda x:
                                                                 np.nanpercentile(x,
                                                                 percentile), bins=20)
+                    count, _, _, _ = binned_statistic_2d(flat_samples[:, i], flat_samples[:, j],
+                                                         param, statistic='count',
+                                                         bins=[ybins, xbins])
+                    hist[count < min_2d_count] = np.nan
                     _hist = np.ma.array(hist, mask=np.isnan(hist))
 
                     cmap = plt.get_cmap('viridis')
@@ -272,6 +272,12 @@ def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fraci
                                        min_cut=max(np.nanpercentile(hist, 1), -10), clip=False)
                     ax.pcolormesh(xbins, ybins, _hist, norm=norm, cmap=cmap,
                                   edgecolors='face', shading='flat')
+                    xlim, ylim = ax.get_xlim(), ax.get_ylim()
+                    if i == 2 and j == 1:  # HARDCODED n_obs, dt_int
+                        _x = np.linspace(xlim[0], xlim[1], 1000)
+                        ax.plot(_x, (max_interval - min_offset)/_x + 1, 'k-')
+                        ax.plot(_x, (max_interval - max_offset)/_x + 1, 'r-')
+                    ax.set_ylim(ylim)
                     if i == ndim - 1:
                         ax.set_xlabel(labels[j])
                     else:

@@ -119,39 +119,24 @@ def get_sn_model(sn_type, setflag, t0=0.0, z=0.0):
     # draw salt2 x1 and c from salt2_parameters (gaussian, x1: x0=0.4, sigma=0.9, c: x0=-0.04,
     # sigma = 0.1); Hounsell 2017 gives SALT2 models over a wider wavelength range
 
-    if sn_type == 'Ia':
-        sn_model = sncosmo.Model('salt2-extended-h17')
-        if setflag:
-            x1, c = np.random.normal(0.4, 0.9), np.random.normal(-0.04, 0.1)
-            sn_model.set(t0=t0, z=z, x1=x1, c=c)
-    elif sn_type == 'Iat':
+    if sn_type == 'Ia':  # -20-+50
+        sn_model = sncosmo.Model('hsiao')
+    elif sn_type == 'Iat':  # 0-93
         sn_model = sncosmo.Model('nugent-sn91t')
-        if setflag:
-            sn_model.set(t0=t0, z=z)
-    elif sn_type == 'Iabg':
+    elif sn_type == 'Iabg':  # 0-113
         sn_model = sncosmo.Model('nugent-sn91bg')
-        if setflag:
-            sn_model.set(t0=t0, z=z)
-    elif sn_type == 'Ib':
-        sn_model = sncosmo.Model('snana-2007nc')
-        if setflag:
-            sn_model.set(t0=t0, z=z)
-    elif sn_type == 'Ic':
-        sn_model = sncosmo.Model('snana-2006lc')
-        if setflag:
-            sn_model.set(t0=t0, z=z)
-    elif sn_type == 'IIP' or sn_type == 'II':
-        sn_model = sncosmo.Model('snana-2007nv')
-        if setflag:
-            sn_model.set(t0=t0, z=z)
-    elif sn_type == 'IIL':
+    elif sn_type == 'Ib':  # -44.16-+168.48
+        sn_model = sncosmo.Model('snana-2007y')
+    elif sn_type == 'Ic':  # -42.48-+167.4
+        sn_model = sncosmo.Model('snana-2004fe')
+    elif sn_type == 'IIP' or sn_type == 'II':  # -28.8-+79.4
+        sn_model = sncosmo.Model('snana-2007kw')
+    elif sn_type == 'IIL':  # 0-411; really about 150 before polynomial fit increases flux again
         sn_model = sncosmo.Model('nugent-sn2l')
-        if setflag:
-            sn_model.set(t0=t0, z=z)
-    elif sn_type == 'IIn':
-        sn_model = sncosmo.Model('snana-2006ix')
-        if setflag:
-            sn_model.set(t0=t0, z=z)
+    elif sn_type == 'IIn':  # 0-227, but really to about 150
+        sn_model = sncosmo.Model('nugent-sn2n')  # 'snana-2006ix')
+    if setflag:
+        sn_model.set(t0=t0, z=z)
     # TODO: add galaxy dust via smcosmo.F99Dust([r_v])
 
     return sn_model
@@ -355,11 +340,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
                np.array(fluxerr_array), np.array(zp_array), np.array(zpsys_array)]
     true_flux = np.array(true_flux)
 
-    param_names = ['z', 't0']
-    if sn_type == 'Ia':
-        param_names += ['x0', 'x1', 'c']
-    else:
-        param_names += ['amplitude']
+    param_names = ['z', 't0', 'amplitude']
     sn_params = [sn_model[q] for q in param_names]
 
     return images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux
@@ -437,11 +418,7 @@ def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, psf_r):
                np.array(fluxerr_array), np.array(zp_array), np.array(zpsys_array)]
     true_flux = np.array(true_flux)
 
-    param_names = ['z', 't0']
-    if sn_type == 'Ia':
-        param_names += ['x0', 'x1', 'c']
-    else:
-        param_names += ['amplitude']
+    param_names = ['z', 't0', 'amplitude']
     sn_params = np.array([sn_model[q] for q in param_names])
 
     return lc_data, sn_params, true_flux
@@ -458,11 +435,7 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
     min_counts = 0.0001
 
     for i, sn_type in enumerate(sn_types):
-        params = ['t0']
-        if sn_type == 'Ia':
-            params += ['x0', 'x1', 'c']
-        else:
-            params += ['amplitude']
+        params = ['t0', 'amplitude']
         sn_model = get_sn_model(sn_type, 0)
 
         # place upper limits on the redshift probeable, by finding the z at which each filter drops
@@ -506,9 +479,6 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
         z_min = np.amax(z_lower_count)
         z_max = min(np.amin(z_upper_band), np.amin(z_upper_count))
         bounds = {}
-        # x1 and c bounded by 3.5-sigma regions (x1: mu=0.4, sigma=0.9, c: mu=-0.04, sigma = 0.1)
-        if sn_type == 'Ia':
-            bounds.update({'x1': (-2.75, 3.55), 'c': (-0.39, 0.31)})
         bounds.update({'z': (z_min, z_max)})
         params += ['z']
 
@@ -533,17 +503,19 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
                                               minsnr=minsnr, guess_z=guess_z)
         bestfit_models.append(fitted_model)
         bestfit_results.append(result)
-        try:
-            x2s[i] = result.chisq
-        except AttributeError:
-            x2s[i] = sncosmo.chisq(lc_data, fitted_model)
-
-    # TODO: add a fire extinguisher null hypothesis probability properly
+        if np.any([message in fitted_model.message for message in ['error invalid',
+                   'positive definite', 'No covar', 'Failed']]) or not fitted_model.success:
+            x2s[i] = 1e15
+        else:
+            try:
+                x2s[i] = result.chisq
+            except AttributeError:
+                x2s[i] = sncosmo.chisq(lc_data, fitted_model)
 
     # given a reduced chi-squared of 10, we need to know what the regular chi-squared would be
     x2v_f = 10
-    # fit parameters is always z/t0, but Ia models have 3 additional paramters to the CC's 1
-    n_param = 5 if sn_types[type_ind] == 'Ia' else 3
+    # z/t0/A are the fit parameters for all models
+    n_param = 3
     x2_f = x2v_f * (len(lc_data['flux']) - n_param)
     fire_prior = 1e-3
     fire = fire_prior * np.exp(-x2_f / 2)
@@ -587,40 +559,48 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
         fit_params = bestfit_models[type_ind].parameters
         fit_errors = bestfit_results[type_ind].errors
         dz = np.log10(np.abs(fit_params[0] - sn_params[0]))
-        dz_sigz = np.log10(np.abs((fit_params[0] - sn_params[0]) / (fit_errors.get('z') + 1e-50)))
+        sigz = fit_errors.get('z')
+        dz_sigz = np.log10(np.abs((fit_params[0] - sn_params[0]) / (sigz + 1e-50)))
         sign_dz = np.sign(fit_params[0] - sn_params[0])
         dt = np.log10(np.abs(fit_params[1] - sn_params[1]))
-        dt_sigt = np.log10(np.abs((fit_params[1] - sn_params[1]) / (fit_errors.get('t0') + 1e-50)))
+        sigt = fit_errors.get('t0')
+        dt_sigt = np.log10(np.abs((fit_params[1] - sn_params[1]) / (sigt + 1e-50)))
         sign_dt = np.sign(fit_params[1] - sn_params[2])
         da = np.log10(np.abs((fit_params[2] - sn_params[2]) / sn_params[2]))
-        if sn_types[type_ind] == 'Ia':
-            da_siga = np.log10(np.abs((fit_params[2] - sn_params[2]) /
-                                      (fit_errors.get('x0') + 1e-50)))
-        else:
-            da_siga = np.log10(np.abs((fit_params[2] - sn_params[2]) /
-                                      (fit_errors.get('amplitude') + 1e-50)))
+        siga = fit_errors.get('amplitude')
+        da_siga = np.log10(np.abs((fit_params[2] - sn_params[2]) / (siga + 1e-50)))
         sign_da = np.sign(fit_params[2] - sn_params[2])
-        return lnprob, [dz, dz_sigz, dt, dt_sigt, da, da_siga, sign_dz, sign_dt, sign_da]
+        return lnprob, [dz, dz_sigz, dt, dt_sigt, da, da_siga, sigz, sigt, siga,
+                        sign_dz, sign_dt, sign_da]
 
 
 @profile
 def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp,
                            psf_comp_filename, dark_current, readnoise, t0, lambda_eff,
                            make_sky_figs, make_fit_figs, make_flux_figs, image_flag, multi_z_fit,
-                           psf_r, return_full, draw_sn_types):
+                           psf_r, return_full, draw_sn_types, max_interval, min_offset,
+                           max_offset):
     logexptime, t_interval, _n_obs = p
     n_obs = int(np.rint(_n_obs))
     exptime = 10**logexptime
-    t_low, t_high = 0, (n_obs - 1) * t_interval
-    times = np.arange(t_low, min(100, t_high)+1e-10, t_interval) + \
-        np.random.uniform(-t_interval, t_interval)
-    # only consider sources out to ~100 days, and limit the exposure time, image interval, and
-    # number of exposures to sensible values
-    # TODO: figure out if this is sensible, or if we can get better sncosmo models that go out to
-    # longer times (but would have to go to more like 3000 days...) #  or t_high >= 110
+    # we have to assume we have some vaguely sensible timeframe for finding these outbursts via
+    # difference images, so place a strictly negative limit on the first observation, relative to
+    # peak brightness; if t_low is too early and we have insufficient observations with too small
+    # a spacing then we may miss the SN entirely! similarly, if dt is too large we might get
+    # insufficient observations to find the outburst at all... [min_offset should be a large
+    # negative number, max_offset a small negative number]
+    t_low = np.random.uniform(min_offset, max_offset)
+    t_high = (n_obs - 1) * t_interval + t_low
+    times = np.arange(t_low, t_high, t_interval)
+    # only consider sources out to ~100 days as the models get a little suspect beyond about this
+    # time frame; this doesn't allow for the possibility of -- at the extreme -- the extra
+    # observation you might get for large t_interval (i.e., for dt = 100 you could have
+    # times = [-50, 50, 150]), but if the models aren't good above 100 days not much you can do...
+    times = times[times <= 100]
+    # limit the exposure time, image interval, and number of exposures to sensible values
     if len(filters) * len(times) <= 0 or exptime <= 0 or exptime >= 10000 or t_interval <= 0 or \
-            t_interval >= 100 or _n_obs <= 0 or _n_obs >= 30:
-        return -np.inf, [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan]
+            t_interval >= max_interval or _n_obs <= 0 or _n_obs >= 30:
+        return -np.inf, [np.nan]*12
 
     draw_type_ind = np.random.choice(len(draw_sn_types))
     type_ind = np.where(draw_sn_types[draw_type_ind] == sn_types)[0][0]
@@ -639,22 +619,16 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
     lc_data_table = Table(data=lc_data,
                           names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
     if not np.amax(lc_data_table['flux'].data / lc_data_table['fluxerr'].data) >= minsnr:
-        return -np.inf, [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan]
+        return -np.inf, [np.nan]*12
 
     figtext = []
-    if sn_types[type_ind] == 'Ia':
-        z_, t_, x0_, x1_, c_ = sn_params
-        figtext.append('Type {}: $z = {:.3f}$\n$t_0 = {:.1f}$\n'
-                       '$x_0 = {:.5f}$'.format(sn_types[type_ind], z_, t_, x0_))
-        figtext.append('$x_1 = {:.5f}$\n$c = {:.5f}$'.format(x1_, c_))
-    else:
-        z_ = sn_params[0]
-        t_ = sn_params[1]
-        A_ = sn_params[2]
-        A_sig = int(np.floor(np.log10(abs(A_))))
-        figtext.append('Type {}: $z = {:.3f}$\n$t_0 = {:.1f}$'.format(
-                       sn_types[type_ind], z_, t_))
-        figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
+    z_ = sn_params[0]
+    t_ = sn_params[1]
+    A_ = sn_params[2]
+    A_sig = int(np.floor(np.log10(abs(A_))))
+    figtext.append('Type {}: $z = {:.3f}$\n$t_0 = {:.1f}$'.format(
+                   sn_types[type_ind], z_, t_))
+    figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
 
     fit_lc_out = fit_lc(lc_data_table, sn_types, directory, filters, figtext, ncol, minsnr,
                         sn_priors, filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params,
@@ -702,10 +676,7 @@ if __name__ == '__main__':
 
     if not os.path.exists(directory):
         os.makedirs(directory)
-    if not os.path.exists('{}/savefiles'.format(directory)) and not load:
-        os.makedirs('{}/savefiles'.format(directory))
-    if load and len(glob.glob('{}/savefiles/*.npy')[0]) != 5:
-        load = False
+
     psf_comp_filename = '../PSFs/wfirst_psf_comp.npy'
 
     filters_master = np.array(['z087', 'y106', 'w149', 'j129', 'h158', 'f184'])  # 'r062'
@@ -738,28 +709,33 @@ if __name__ == '__main__':
     snr_det = 5  # minimum SNR to consider a detection, given source and background noise
     rnoise = 20  # readout noise RMS
 
+    min_1d_count, min_2d_count = 10, 10
+    max_interval, min_offset, max_offset = 100, -100, -5  # days
+
     # sse.faintest_sn(sn_types, filters_master, exptime, filt_zp_master, snr_det, psf_r, rnoise,
     #                 dark)
     # sys.exit()
 
-    names, axis_names, fracinds, percentiles = ['z', 't0', 'A', 'z', 't0', 'A', 'p'], \
+    names, axis_names, fracinds, percentiles = ['z', 't0', 'A', 'z', 't0', 'A', 'z', 't0', 'A',
+                                                'p'], \
         [r'log$_{{10}}$($|\Delta$z/$\sigma_\mathrm{{\Delta z}}|$)',
          r'log$_{{10}}$($|\Delta$t0/$\sigma_\mathrm{{\Delta t0}}|$)',
          r'log$_{{10}}$($|\Delta$A/$\sigma_\mathrm{{\Delta A}}|$)',
          r'log$_{{10}}$($|\Delta$z$|$)', r'log$_{{10}}$($|\Delta$t0$|$)',
-         r'log$_{{10}}$($|\Delta$A/A$|$)', r'log$_{{10}}$(p)'], \
-        [6, 7, 8, 6, 7, 8, 0], [1, 16, 50, 84, 99]
+         r'log$_{{10}}$($|\Delta$A/A$|$)', r'$\sigma_\mathrm{{\Delta z}}$',
+         r'$\sigma_\mathrm{{\Delta t0}}$', r'$\sigma_\mathrm{{\Delta A}}$', r'log$_{{10}}$(p)'], \
+        [9, 10, 11, 9, 10, 11, 0, 0, 0, 0], [1, 16, 50, 84, 99]
 
     make_sky_figs, make_flux_figs, image_flag = False, False, False
     make_fit_figs = False
     multi_z_fit, fit_cc, return_full = False, False, False
 
-    sub_inds_combos = [[2], [0, 3, 4], [0, 1, 2, 3, 4, 5], [1, 5]]
+    sub_inds_combos = [[3], [2], [0, 3, 4], [0, 1, 2, 3, 4, 5], [1, 5]]
     draw_sn_types_ = [np.array(['Ia'])]
 
-    nchain = 7000
+    nchain = 3100
     nburnin = 500
-
+    changeloadflag = False
     for draw_sn_types in draw_sn_types_:
         for sub_inds in sub_inds_combos:
             filters = filters_master[sub_inds]
@@ -768,17 +744,33 @@ if __name__ == '__main__':
             lambda_eff = lambda_eff_master[sub_inds]
             args = (directory, sn_types, filters, pixel_scale, filt_zp, psf_comp_filename,
                     dark_current, readnoise, t0, lambda_eff, make_sky_figs, make_fit_figs,
-                    make_flux_figs, image_flag, multi_z_fit, psf_r, return_full, draw_sn_types)
+                    make_flux_figs, image_flag, multi_z_fit, psf_r, return_full, draw_sn_types,
+                    max_interval, min_offset, max_offset)
 
             subname = ''
             for f in filters:
                 subname += f
 
-            nwalkers, ndim = 12, 3
-            pos = [2.5, 60, 2] + 1e-1*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
+            if load and not os.path.exists('{}/savefiles'.format(directory)):
+                os.makedirs('{}/savefiles'.format(directory))
+                load = False
+                changeloadflag = True
+            if load and len(glob.glob('{}/savefiles/{}_*.npy'.format(directory, subname))) != 5:
+                load = False
+                changeloadflag = True
+
+            nwalkers, ndim = 30, 3
+
+            if load and os.path.isfile('{}/savefiles/{}_samples.npy'.format(
+                    directory, subname)) and not np.all(
+                    np.load('{}/savefiles/{}_samples.npy'.format(directory, subname)).shape[i] ==
+                    (nwalkers, nchain, ndim)[i] for i in range(0, 3)):
+                load = False
+                changeloadflag = True
+
+            pos = [2.5, 60, 2] + 0.5*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
 
             if not load:
-                pass
                 start = timeit.default_timer()
                 pool = Pool(10)
                 sampler = emcee.EnsembleSampler(nwalkers, ndim, run_filt_cadence_combo, args=args,
@@ -787,15 +779,23 @@ if __name__ == '__main__':
                 pool.close()
                 end = timeit.default_timer()
                 samples = sampler.chain
-                flat_samples = sampler.chain[:, nburnin:, :].reshape((-1, ndim))
+                flat_samples = samples[:, nburnin:, :].reshape((-1, ndim))
                 # blobs is iterations, nwalkers while chain is nwalkers, iterations, ndim, so swap
                 # axes 0+1 remembering to reshape by number of blob items returned for each lnprob
-                flat_blobs = np.array(sampler.blobs[nburnin:]).swapaxes(0, 1).reshape(-1, 9)
+                flat_blobs = np.array(sampler.blobs[nburnin:]).swapaxes(0, 1).reshape(-1, 12)
                 lnprob = sampler.lnprobability
                 sampler_acceptance_fraction = sampler.acceptance_fraction
                 time = end-start
                 try:
-                    tau = sampler.get_autocorr_time()
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('ignore', message='FutureWarning: Using a '
+                                                'non-tuple sequence for multidimensional '
+                                                'indexing is deprecated; use `arr[tuple(seq)]` '
+                                                'instead of `arr[seq]`. In the future this will '
+                                                'be interpreted as an array index, '
+                                                '`arr[np.array(seq)]`, which will result either '
+                                                'in an error or a different result.')
+                        tau = sampler.get_autocorr_time()
                 except emcee.autocorr.AutocorrError:
                     tau = 'Cannot reliably calculate autocorrelation time'
             else:
@@ -833,14 +833,24 @@ if __name__ == '__main__':
 
             logprob = np.log10(np.exp(lnprob))[:, nburnin:].reshape((-1))
             params = [flat_blobs[:, 1], flat_blobs[:, 3], flat_blobs[:, 5], flat_blobs[:, 0],
-                      flat_blobs[:, 2], flat_blobs[:, 4], logprob]
+                      flat_blobs[:, 2], flat_blobs[:, 4], flat_blobs[:, 6], flat_blobs[:, 7],
+                      flat_blobs[:, 8], logprob]
 
             if not load:
                 np.save('{}/savefiles/{}_flatblobs.npy'.format(directory, subname), flat_blobs)
                 np.save('{}/savefiles/{}_lnprob.npy'.format(directory, subname), lnprob)
                 np.save('{}/savefiles/{}_flatsamples.npy'.format(directory, subname), flat_samples)
-                np.save('{}/savefiles/{}_misc.npy'.format(directory, subname), np.array([sampler_acceptance_fraction, time, tau]))  # have to allow_pickle=True to load this
+                np.save('{}/savefiles/{}_misc.npy'.format(directory, subname),
+                        np.array([sampler_acceptance_fraction, time, tau]))
                 np.save('{}/savefiles/{}_samples.npy'.format(directory, subname), samples)
 
             sse.make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fracinds,
-                                         flat_samples, flat_blobs, labels, directory, subname)
+                                         flat_samples, flat_blobs, labels, directory, subname,
+                                         min_1d_count, min_2d_count, max_interval, min_offset,
+                                         max_offset)
+
+            # if loading things, this allows for just one of N iterations to be run, if a new model
+            # is added but all of the others are the same, e.g.
+            if changeloadflag:
+                load = True
+                changeloadflag = False
