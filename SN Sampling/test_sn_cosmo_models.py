@@ -43,7 +43,7 @@ for typing, c, set_model in zip(typings, cs, set_models):
     t = np.linspace(sn_model.mintime(), sn_model.maxtime(), 1000)
     for band, ax in zip(bands, axs):
         f = sn_model.bandflux(band, time=t)
-        ax.plot(t, f, ls='-', c=c, label=typing + '*' if set_model else typing)
+        ax.plot(t, f, ls='-', c=c, label=typing)
         f = sn_model.bandflux(band, time=t_max)
         ax.plot(t_max, f, ls='--', c=c)
         ax.axvline(sn_model.maxtime() if 'L' not in typing and 'n' not in typing else
@@ -61,15 +61,7 @@ for typing, c, set_model in zip(typings, cs, set_models):
                               m.minwave(), m.maxwave(), [m._source.peakphase(band) for band in bands])
                     except ValueError:
                         pass
-sn_model = sncosmo.Model('nugent-sn2p')
-sn_model.set(t0=0, z=z)
-sn_model.set_source_peakabsmag(-19.0, 'f125w', 'ab')
-t = np.linspace(sn_model.mintime(), sn_model.maxtime(), 1000)
-for band, ax in zip(bands, axs):
-    f = sn_model.bandflux(band, time=t)
-    ax.plot(t, f, ls='-', c='orange', label='IIP2')
-    f = sn_model.bandflux(band, time=t_max)
-    ax.plot(t_max, f, ls='--', c='orange')
+
 axs[0].legend()
 for ax in axs:
     ax.axvline(150, ls=':', c='k', lw=1.5)

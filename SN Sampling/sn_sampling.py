@@ -22,7 +22,6 @@ import sn_sampling_extras as sse
 import psf_mog_fitting as pmf
 
 import emcee
-import corner
 from multiprocessing import Pool
 
 import warnings
@@ -499,18 +498,23 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
         # after a round of minimising the lightcurve at fixed redshifts, add redshift to allow a
         # final fit of the model to the data
         guess_z = True if fitted_model is sn_model else False
-        result, fitted_model = sncosmo.fit_lc(lc_data, fitted_model, params, bounds=bounds,
-                                              minsnr=minsnr, guess_z=guess_z)
-        bestfit_models.append(fitted_model)
-        bestfit_results.append(result)
-        if np.any([message in fitted_model.message for message in ['error invalid',
-                   'positive definite', 'No covar', 'Failed']]) or not fitted_model.success:
+        try:
+            result, fitted_model = sncosmo.fit_lc(lc_data, fitted_model, params, bounds=bounds,
+                                                  minsnr=minsnr, guess_z=guess_z)
+            bestfit_models.append(fitted_model)
+            bestfit_results.append(result)
+            if np.any([message in result.message for message in ['error invalid',
+                       'positive definite', 'No covar', 'Failed']]) or not result.success:
+                x2s[i] = 1e15
+            else:
+                try:
+                    x2s[i] = result.chisq
+                except AttributeError:
+                    x2s[i] = sncosmo.chisq(lc_data, fitted_model)
+        # if sncosmo.fit_lc falls over with NaN parameters we can catch the error and just set
+        # the chi-squared for to super large, exactly like we do above with a returned-but-poor fit
+        except RuntimeError:
             x2s[i] = 1e15
-        else:
-            try:
-                x2s[i] = result.chisq
-            except AttributeError:
-                x2s[i] = sncosmo.chisq(lc_data, fitted_model)
 
     # given a reduced chi-squared of 10, we need to know what the regular chi-squared would be
     x2v_f = 10
@@ -559,15 +563,15 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
         fit_params = bestfit_models[type_ind].parameters
         fit_errors = bestfit_results[type_ind].errors
         dz = np.log10(np.abs(fit_params[0] - sn_params[0]))
-        sigz = fit_errors.get('z')
+        sigz = np.log10(np.abs(fit_errors.get('z')))
         dz_sigz = np.log10(np.abs((fit_params[0] - sn_params[0]) / (sigz + 1e-50)))
         sign_dz = np.sign(fit_params[0] - sn_params[0])
         dt = np.log10(np.abs(fit_params[1] - sn_params[1]))
-        sigt = fit_errors.get('t0')
+        sigt = np.log10(np.abs(fit_errors.get('t0')))
         dt_sigt = np.log10(np.abs((fit_params[1] - sn_params[1]) / (sigt + 1e-50)))
         sign_dt = np.sign(fit_params[1] - sn_params[2])
         da = np.log10(np.abs((fit_params[2] - sn_params[2]) / sn_params[2]))
-        siga = fit_errors.get('amplitude')
+        siga = np.log10(np.abs(fit_errors.get('amplitude')))
         da_siga = np.log10(np.abs((fit_params[2] - sn_params[2]) / (siga + 1e-50)))
         sign_da = np.sign(fit_params[2] - sn_params[2])
         return lnprob, [dz, dz_sigz, dt, dt_sigt, da, da_siga, sigz, sigt, siga,
@@ -596,10 +600,10 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
     # time frame; this doesn't allow for the possibility of -- at the extreme -- the extra
     # observation you might get for large t_interval (i.e., for dt = 100 you could have
     # times = [-50, 50, 150]), but if the models aren't good above 100 days not much you can do...
-    times = times[times <= 100]
+    # times = times[times <= 100]
     # limit the exposure time, image interval, and number of exposures to sensible values
     if len(filters) * len(times) <= 0 or exptime <= 0 or exptime >= 10000 or t_interval <= 0 or \
-            t_interval >= max_interval or _n_obs <= 0 or _n_obs >= 30:
+            t_interval >= max_interval or _n_obs <= 0 or _n_obs >= 30 or np.any(times > 100):
         return -np.inf, [np.nan]*12
 
     draw_type_ind = np.random.choice(len(draw_sn_types))
@@ -672,7 +676,7 @@ if __name__ == '__main__':
         matplotlib.use('Agg')  # change to non-interactive backend if nohup mode used
 
     directory = 'out_gals'
-    load = False
+    load = True
 
     if not os.path.exists(directory):
         os.makedirs(directory)
@@ -717,14 +721,15 @@ if __name__ == '__main__':
     # sys.exit()
 
     names, axis_names, fracinds, percentiles = ['z', 't0', 'A', 'z', 't0', 'A', 'z', 't0', 'A',
-                                                'p'], \
+                                                'p', 'Total counts'], \
         [r'log$_{{10}}$($|\Delta$z/$\sigma_\mathrm{{\Delta z}}|$)',
          r'log$_{{10}}$($|\Delta$t0/$\sigma_\mathrm{{\Delta t0}}|$)',
          r'log$_{{10}}$($|\Delta$A/$\sigma_\mathrm{{\Delta A}}|$)',
          r'log$_{{10}}$($|\Delta$z$|$)', r'log$_{{10}}$($|\Delta$t0$|$)',
-         r'log$_{{10}}$($|\Delta$A/A$|$)', r'$\sigma_\mathrm{{\Delta z}}$',
-         r'$\sigma_\mathrm{{\Delta t0}}$', r'$\sigma_\mathrm{{\Delta A}}$', r'log$_{{10}}$(p)'], \
-        [9, 10, 11, 9, 10, 11, 0, 0, 0, 0], [1, 16, 50, 84, 99]
+         r'log$_{{10}}$($|\Delta$A/A$|$)', r'log$_{{10}}$($|\sigma_\mathrm{{\Delta z}}$|)',
+         r'log$_{{10}}$($|\sigma_\mathrm{{\Delta t0}}|$)',
+         r'log$_{{10}}$($|\sigma_\mathrm{{\Delta A}}|$)', r'log$_{{10}}$(p)', 'N'], \
+        [9, 10, 11, 9, 10, 11, 0, 0, 0, 0, 0], [1, 16, 50, 84, 99]
 
     make_sky_figs, make_flux_figs, image_flag = False, False, False
     make_fit_figs = False
@@ -733,7 +738,7 @@ if __name__ == '__main__':
     sub_inds_combos = [[3], [2], [0, 3, 4], [0, 1, 2, 3, 4, 5], [1, 5]]
     draw_sn_types_ = [np.array(['Ia'])]
 
-    nchain = 3100
+    nchain = 1800  # 3100
     nburnin = 500
     changeloadflag = False
     for draw_sn_types in draw_sn_types_:
@@ -759,7 +764,7 @@ if __name__ == '__main__':
                 load = False
                 changeloadflag = True
 
-            nwalkers, ndim = 30, 3
+            nwalkers, ndim = 60, 3  # 30, 3
 
             if load and os.path.isfile('{}/savefiles/{}_samples.npy'.format(
                     directory, subname)) and not np.all(
@@ -768,7 +773,7 @@ if __name__ == '__main__':
                 load = False
                 changeloadflag = True
 
-            pos = [2.5, 60, 2] + 0.5*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
+            pos = [2.5, 60, 4] + 0.5*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
 
             if not load:
                 start = timeit.default_timer()
@@ -786,24 +791,12 @@ if __name__ == '__main__':
                 lnprob = sampler.lnprobability
                 sampler_acceptance_fraction = sampler.acceptance_fraction
                 time = end-start
-                try:
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings('ignore', message='FutureWarning: Using a '
-                                                'non-tuple sequence for multidimensional '
-                                                'indexing is deprecated; use `arr[tuple(seq)]` '
-                                                'instead of `arr[seq]`. In the future this will '
-                                                'be interpreted as an array index, '
-                                                '`arr[np.array(seq)]`, which will result either '
-                                                'in an error or a different result.')
-                        tau = sampler.get_autocorr_time()
-                except emcee.autocorr.AutocorrError:
-                    tau = 'Cannot reliably calculate autocorrelation time'
             else:
                 flat_blobs = np.load('{}/savefiles/{}_flatblobs.npy'.format(directory, subname))
                 lnprob = np.load('{}/savefiles/{}_lnprob.npy'.format(directory, subname))
                 flat_samples = np.load('{}/savefiles/{}_flatsamples.npy'.format(directory,
                                                                                 subname))
-                sampler_acceptance_fraction, time, tau = np.load('{}/savefiles/{}_misc.npy'.format(
+                sampler_acceptance_fraction, time = np.load('{}/savefiles/{}_misc.npy'.format(
                     directory, subname), allow_pickle=True)
                 samples = np.load('{}/savefiles/{}_samples.npy'.format(directory, subname))
 
@@ -826,22 +819,18 @@ if __name__ == '__main__':
             plt.tight_layout()
             plt.savefig('{}/{}_correlation.pdf'.format(directory, subname))
 
-            fig = corner.corner(flat_samples, labels=labels)
-            plt.savefig('{}/{}_corner_pdf.pdf'.format(directory, subname))
-
-            print(tau)
-
             logprob = np.log10(np.exp(lnprob))[:, nburnin:].reshape((-1))
             params = [flat_blobs[:, 1], flat_blobs[:, 3], flat_blobs[:, 5], flat_blobs[:, 0],
-                      flat_blobs[:, 2], flat_blobs[:, 4], flat_blobs[:, 6], flat_blobs[:, 7],
-                      flat_blobs[:, 8], logprob]
+                      flat_blobs[:, 2], flat_blobs[:, 4], np.log10(np.abs(flat_blobs[:, 6])),
+                      np.log10(np.abs(flat_blobs[:, 7])), np.log10(np.abs(flat_blobs[:, 8])),
+                      logprob, logprob]  # logprob twice to fake actual histogram
 
             if not load:
                 np.save('{}/savefiles/{}_flatblobs.npy'.format(directory, subname), flat_blobs)
                 np.save('{}/savefiles/{}_lnprob.npy'.format(directory, subname), lnprob)
                 np.save('{}/savefiles/{}_flatsamples.npy'.format(directory, subname), flat_samples)
                 np.save('{}/savefiles/{}_misc.npy'.format(directory, subname),
-                        np.array([sampler_acceptance_fraction, time, tau]))
+                        np.array([sampler_acceptance_fraction, time]))
                 np.save('{}/savefiles/{}_samples.npy'.format(directory, subname), samples)
 
             sse.make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fracinds,

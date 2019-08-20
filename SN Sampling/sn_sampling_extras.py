@@ -204,24 +204,32 @@ def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fraci
     gs_outer = gridcreate('0', len(percentiles), len(names), 1, 4*ndim)
     for jj, (param, name, axis_name, fracind) in enumerate(zip(params, names,
                                                                axis_names, fracinds)):
+        if jj == len(names) - 1:
+            func = 'count'
+        else:
+            func = lambda x: np.nanpercentile(x, percentile)
         for ii, percentile in enumerate(percentiles):
             gs = gridspec.GridSpecFromSubplotSpec(ndim, ndim*3, subplot_spec=gs_outer[ii, jj],
                                                   hspace=0, wspace=0)
+            ndim_bins = []
             for i in range(0, ndim):
                 hist, bins, _ = binned_statistic(flat_samples[:, i], param,
-                                                 statistic=lambda x: np.nanpercentile(x,
-                                                 percentile), bins=20)
-                count, _, _ = binned_statistic(flat_samples[:, i], param,
-                                               statistic='count', bins=bins)
-                hist[count < min_1d_count] = np.nan
+                                                 statistic=func, bins=20)
+                ndim_bins.append(bins)
+                if jj < len(names) - 1:
+                    count, _, _ = binned_statistic(flat_samples[:, i], param,
+                                                   statistic='count', bins=bins)
+                    hist[count < min_1d_count] = np.nan
+                else:
+                    hist[hist <= 0] = np.nan
 
                 ax = plt.subplot(gs[i, 3*i:3*i+3], label=jj*2+ii*3+i*5)
                 ax.plot(bins, np.append(hist, hist[-1]), ls='-', c='k', drawstyle='steps-post')
                 if i == ndim - 1:
                     ax.set_xlabel(labels[i])
-                    ax.set_xlim(bins[0], bins[-1])
                 else:
                     ax.set_xticklabels([])
+                ax.set_xlim(bins[0], bins[-1])
                 if i == 0:
                     ax.set_ylabel(axis_name)
                     if jj < len(names) - 4:
@@ -256,13 +264,16 @@ def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fraci
                     ax = plt.subplot(gs[i, 3*j:3*j+3], label=jj*30+ii*38+i*4+j*7)
                     hist, ybins, xbins, _ = binned_statistic_2d(flat_samples[:, i],
                                                                 flat_samples[:, j],
-                                                                param, statistic=lambda x:
-                                                                np.nanpercentile(x,
-                                                                percentile), bins=20)
-                    count, _, _, _ = binned_statistic_2d(flat_samples[:, i], flat_samples[:, j],
-                                                         param, statistic='count',
-                                                         bins=[ybins, xbins])
-                    hist[count < min_2d_count] = np.nan
+                                                                param, statistic=func,
+                                                                bins=[ndim_bins[i], ndim_bins[j]])
+                    if jj < len(names) - 1:
+                        count, _, _, _ = binned_statistic_2d(flat_samples[:, i],
+                                                             flat_samples[:, j], param,
+                                                             statistic='count',
+                                                             bins=[ybins, xbins])
+                        hist[count < min_2d_count] = np.nan
+                    else:
+                        hist[hist <= 0] = np.nan
                     _hist = np.ma.array(hist, mask=np.isnan(hist))
 
                     cmap = plt.get_cmap('viridis')
@@ -272,12 +283,8 @@ def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fraci
                                        min_cut=max(np.nanpercentile(hist, 1), -10), clip=False)
                     ax.pcolormesh(xbins, ybins, _hist, norm=norm, cmap=cmap,
                                   edgecolors='face', shading='flat')
-                    xlim, ylim = ax.get_xlim(), ax.get_ylim()
-                    if i == 2 and j == 1:  # HARDCODED n_obs, dt_int
-                        _x = np.linspace(xlim[0], xlim[1], 1000)
-                        ax.plot(_x, (max_interval - min_offset)/_x + 1, 'k-')
-                        ax.plot(_x, (max_interval - max_offset)/_x + 1, 'r-')
-                    ax.set_ylim(ylim)
+                    ax.set_xlim(ndim_bins[j][0], ndim_bins[j][-1])
+                    ax.set_ylim(ndim_bins[i][0], ndim_bins[i][-1])
                     if i == ndim - 1:
                         ax.set_xlabel(labels[j])
                     else:
