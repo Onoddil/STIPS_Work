@@ -1,7 +1,6 @@
 import sys
 import os
 import math
-import logging
 import galsim
 import galsim.wfirst as wfirst
 from webbpsf import wfirst as wfirst_wpsf

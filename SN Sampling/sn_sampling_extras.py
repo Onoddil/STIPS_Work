@@ -232,7 +232,7 @@ def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fraci
                 ax.set_xlim(bins[0], bins[-1])
                 if i == 0:
                     ax.set_ylabel(axis_name)
-                    if jj < len(names) - 4:
+                    if fracind != -1:
                         posfrac = np.sum(flat_blobs[:, fracind] == 1) / len(flat_blobs) * 100
                         negfrac = np.sum(flat_blobs[:, fracind] == -1) / len(flat_blobs) * 100
                         if ndim > 1:
@@ -306,3 +306,4 @@ def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fraci
                 cb.set_label(axis_name)
     plt.tight_layout()
     plt.savefig('{}/{}_corner_fit.pdf'.format(directory, subname))
+    plt.close()

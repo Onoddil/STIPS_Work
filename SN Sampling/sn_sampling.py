@@ -274,7 +274,6 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
         images_diff = []
         for j in range(0, nfilts):
             image_shifted = images_without_sn[j]
-            # TODO: add exposure and readout time so that exposures are staggered in time?
             time = times[k] + t0
 
             # get the apparent magnitude of the supernova at a given time; first get the
@@ -377,7 +376,6 @@ def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, psf_r):
                 bkg = np.random.uniform(1, 3)
             else:
                 bkg = np.random.uniform(0.3, 0.7)
-            # TODO: add exposure and readout time so that exposures are staggered in time
             time = times[k] + t0
 
             # get the apparent magnitude of the supernova at a given time; first get the
@@ -562,19 +560,19 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
     else:
         fit_params = bestfit_models[type_ind].parameters
         fit_errors = bestfit_results[type_ind].errors
-        dz = np.log10(np.abs(fit_params[0] - sn_params[0]))
+        if np.any([fit_errors.get(q) == 0 for q in ['z', 't0', 'amplitude']]):
+            return -np.inf, [np.nan]*9
+        dz_sigz = np.log10(np.abs((fit_params[0] - sn_params[0]) / (fit_errors.get('z') + 1e-30)))
         sigz = np.log10(np.abs(fit_errors.get('z')))
-        dz_sigz = np.log10(np.abs((fit_params[0] - sn_params[0]) / (sigz + 1e-50)))
         sign_dz = np.sign(fit_params[0] - sn_params[0])
-        dt = np.log10(np.abs(fit_params[1] - sn_params[1]))
+        dt_sigt = np.log10(np.abs((fit_params[1] - sn_params[1]) / (fit_errors.get('t0') + 1e-30)))
         sigt = np.log10(np.abs(fit_errors.get('t0')))
-        dt_sigt = np.log10(np.abs((fit_params[1] - sn_params[1]) / (sigt + 1e-50)))
         sign_dt = np.sign(fit_params[1] - sn_params[2])
-        da = np.log10(np.abs((fit_params[2] - sn_params[2]) / sn_params[2]))
-        siga = np.log10(np.abs(fit_errors.get('amplitude')))
-        da_siga = np.log10(np.abs((fit_params[2] - sn_params[2]) / (siga + 1e-50)))
+        da_siga = np.log10(np.abs((fit_params[2] - sn_params[2]) /
+                                  (fit_errors.get('amplitude') + 1e-30)))
+        siga = np.log10(np.abs(fit_errors.get('amplitude') / sn_params[2]))
         sign_da = np.sign(fit_params[2] - sn_params[2])
-        return lnprob, [dz, dz_sigz, dt, dt_sigt, da, da_siga, sigz, sigt, siga,
+        return lnprob, [dz_sigz, dt_sigt, da_siga, sigz, sigt, siga,
                         sign_dz, sign_dt, sign_da]
 
 
@@ -600,11 +598,11 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
     # time frame; this doesn't allow for the possibility of -- at the extreme -- the extra
     # observation you might get for large t_interval (i.e., for dt = 100 you could have
     # times = [-50, 50, 150]), but if the models aren't good above 100 days not much you can do...
-    # times = times[times <= 100]
-    # limit the exposure time, image interval, and number of exposures to sensible values
+
+    # also limit the exposure time, image interval, and number of exposures to sensible values
     if len(filters) * len(times) <= 0 or exptime <= 0 or exptime >= 10000 or t_interval <= 0 or \
             t_interval >= max_interval or _n_obs <= 0 or _n_obs >= 30 or np.any(times > 100):
-        return -np.inf, [np.nan]*12
+        return -np.inf, [np.nan]*9
 
     draw_type_ind = np.random.choice(len(draw_sn_types))
     type_ind = np.where(draw_sn_types[draw_type_ind] == sn_types)[0][0]
@@ -623,7 +621,7 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
     lc_data_table = Table(data=lc_data,
                           names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
     if not np.amax(lc_data_table['flux'].data / lc_data_table['fluxerr'].data) >= minsnr:
-        return -np.inf, [np.nan]*12
+        return -np.inf, [np.nan]*9
 
     figtext = []
     z_ = sn_params[0]
@@ -663,7 +661,7 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
 # TODO: eventually get list of references for everything used in here: extra codes/modules,
 # sncosmo model references, any data used (priors, etc.)...
 if __name__ == '__main__':
-    # sec_per_filt, nfilts = 5000, 6
+    # sec_per_filt, nfilts = 1500, 6
     # sse.mcmc_runtime(sec_per_filt, nfilts)
     # run_mins = 20/60
     # sse.model_number(run_mins, ngals)
@@ -713,36 +711,38 @@ if __name__ == '__main__':
     snr_det = 5  # minimum SNR to consider a detection, given source and background noise
     rnoise = 20  # readout noise RMS
 
-    min_1d_count, min_2d_count = 10, 10
+    min_1d_count, min_2d_count = 100, 100
     max_interval, min_offset, max_offset = 100, -100, -5  # days
 
     # sse.faintest_sn(sn_types, filters_master, exptime, filt_zp_master, snr_det, psf_r, rnoise,
     #                 dark)
     # sys.exit()
 
-    names, axis_names, fracinds, percentiles = ['z', 't0', 'A', 'z', 't0', 'A', 'z', 't0', 'A',
-                                                'p', 'Total counts'], \
-        [r'log$_{{10}}$($|\Delta$z/$\sigma_\mathrm{{\Delta z}}|$)',
-         r'log$_{{10}}$($|\Delta$t0/$\sigma_\mathrm{{\Delta t0}}|$)',
-         r'log$_{{10}}$($|\Delta$A/$\sigma_\mathrm{{\Delta A}}|$)',
-         r'log$_{{10}}$($|\Delta$z$|$)', r'log$_{{10}}$($|\Delta$t0$|$)',
-         r'log$_{{10}}$($|\Delta$A/A$|$)', r'log$_{{10}}$($|\sigma_\mathrm{{\Delta z}}$|)',
-         r'log$_{{10}}$($|\sigma_\mathrm{{\Delta t0}}|$)',
-         r'log$_{{10}}$($|\sigma_\mathrm{{\Delta A}}|$)', r'log$_{{10}}$(p)', 'N'], \
-        [9, 10, 11, 9, 10, 11, 0, 0, 0, 0, 0], [1, 16, 50, 84, 99]
+    names, axis_names, fracinds, percentiles = ['z', 't0', 'A', 'z', 't0', 'A', 'p',
+                                                'Total counts'], \
+        [r'log$_{{10}}$($|\Delta$z/$\sigma_\mathrm{{z}}|$)',
+         r'log$_{{10}}$($|\Delta$t0/$\sigma_\mathrm{{t0}}|$)',
+         r'log$_{{10}}$($|\Delta$A/$\sigma_\mathrm{{A}}|$)',
+         r'log$_{{10}}$($|\sigma_\mathrm{{z}}$|)', r'log$_{{10}}$($|\sigma_\mathrm{{t0}}|$)',
+         r'log$_{{10}}$($|\sigma_\mathrm{{A}}/A|$)', r'log$_{{10}}$(p)', 'N'], \
+        [6, 7, 8, -1, -1, -1, -1, -1], [1, 16, 25, 50, 75, 84, 99]
 
     make_sky_figs, make_flux_figs, image_flag = False, False, False
     make_fit_figs = False
     multi_z_fit, fit_cc, return_full = False, False, False
 
-    sub_inds_combos = [[3], [2], [0, 3, 4], [0, 1, 2, 3, 4, 5], [1, 5]]
+    sub_inds_combos = [[0], [1], [2], [3], [4], [5],
+                       [0, 1], [0, 2], [0, 3], [0, 4], [0, 5],
+                       [1, 2], [1, 3], [1, 4], [1, 5],
+                       [2, 3], [2, 4], [2, 5], [3, 4], [3, 5], [4, 5], [0, 3, 4],
+                       [0, 1, 3, 4, 5], [0, 1, 2, 3, 4, 5]]
     draw_sn_types_ = [np.array(['Ia'])]
 
-    nchain = 1800  # 3100
+    nchain = 2400
     nburnin = 500
     changeloadflag = False
     for draw_sn_types in draw_sn_types_:
-        for sub_inds in sub_inds_combos:
+        for sub_inds in sub_inds_combos[:1]:
             filters = filters_master[sub_inds]
             filt_zp = filt_zp_master[sub_inds]
             colours = colours_master[sub_inds]
@@ -764,7 +764,7 @@ if __name__ == '__main__':
                 load = False
                 changeloadflag = True
 
-            nwalkers, ndim = 60, 3  # 30, 3
+            nwalkers, ndim = 60, 3
 
             if load and os.path.isfile('{}/savefiles/{}_samples.npy'.format(
                     directory, subname)) and not np.all(
@@ -773,7 +773,7 @@ if __name__ == '__main__':
                 load = False
                 changeloadflag = True
 
-            pos = [2.5, 60, 4] + 0.5*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
+            pos = [2.5, 20, 4] + 0.5*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
 
             if not load:
                 start = timeit.default_timer()
@@ -787,7 +787,8 @@ if __name__ == '__main__':
                 flat_samples = samples[:, nburnin:, :].reshape((-1, ndim))
                 # blobs is iterations, nwalkers while chain is nwalkers, iterations, ndim, so swap
                 # axes 0+1 remembering to reshape by number of blob items returned for each lnprob
-                flat_blobs = np.array(sampler.blobs[nburnin:]).swapaxes(0, 1).reshape(-1, 12)
+                flat_blobs = np.array(sampler.blobs[nburnin:]).swapaxes(0, 1).reshape(
+                    -1, len(sampler.blobs[0][0]))
                 lnprob = sampler.lnprobability
                 sampler_acceptance_fraction = sampler.acceptance_fraction
                 time = end-start
@@ -801,10 +802,11 @@ if __name__ == '__main__':
                 samples = np.load('{}/savefiles/{}_samples.npy'.format(directory, subname))
 
             fig, axes = plt.subplots(3, figsize=(10, 7), sharex=True)
-            print(subname, 'shape: {}, acceptance fraction: {}, time: {:.2f}s'.format(
-                  samples.shape, sampler_acceptance_fraction, time))
-            print('Probability distribution:', np.percentile(np.exp(lnprob),
-                                                             [0, 10, 16, 25, 50, 75, 84, 90, 100]))
+            print(subname, 'shape: {}, acceptance fraction: {:.3f}+/-{:.3f}, time: {:.2f}s, '
+                  'probability distribution: {}'.format(
+                      samples.shape, np.mean(sampler_acceptance_fraction),
+                      np.std(sampler_acceptance_fraction), time, np.percentile(
+                          np.exp(lnprob), [0, 10, 16, 25, 50, 75, 84, 90, 100])))
             labels = [r"log$_{10}$(t$_\mathrm{exp}$ / s)", r"$\Delta$t$_\mathrm{int}$ / day",
                       r"n$_\mathrm{obs}$"]
             for i in range(ndim):
@@ -820,9 +822,8 @@ if __name__ == '__main__':
             plt.savefig('{}/{}_correlation.pdf'.format(directory, subname))
 
             logprob = np.log10(np.exp(lnprob))[:, nburnin:].reshape((-1))
-            params = [flat_blobs[:, 1], flat_blobs[:, 3], flat_blobs[:, 5], flat_blobs[:, 0],
-                      flat_blobs[:, 2], flat_blobs[:, 4], np.log10(np.abs(flat_blobs[:, 6])),
-                      np.log10(np.abs(flat_blobs[:, 7])), np.log10(np.abs(flat_blobs[:, 8])),
+            params = [flat_blobs[:, 0], flat_blobs[:, 1], flat_blobs[:, 2],
+                      flat_blobs[:, 3], flat_blobs[:, 4], flat_blobs[:, 5],
                       logprob, logprob]  # logprob twice to fake actual histogram
 
             if not load:
