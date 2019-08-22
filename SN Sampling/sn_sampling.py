@@ -423,7 +423,7 @@ def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, psf_r):
 
 @profile
 def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_priors,
-           filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params, return_full):
+           filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params):
     x2s = np.empty(len(sn_types), float)
     bestfit_models = []
     bestfit_results = []
@@ -514,6 +514,9 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
         except RuntimeError:
             x2s[i] = 1e15
 
+    if x2s[type_ind] >= 1e15:
+        return bad_return()
+
     # given a reduced chi-squared of 10, we need to know what the regular chi-squared would be
     x2v_f = 10
     # z/t0/A are the fit parameters for all models
@@ -521,66 +524,51 @@ def fit_lc(lc_data, sn_types, directory, filters, figtext, ncol, minsnr, sn_prio
     x2_f = x2v_f * (len(lc_data['flux']) - n_param)
     fire_prior = 1e-3
     fire = fire_prior * np.exp(-x2_f / 2)
-    if fit_cc:
-        # fit probability of returning Ia vs CC
-        probs = np.append(sn_priors*np.exp(-0.5 * x2s), fire)
-        probs /= np.sum(probs)
-        prob = probs[0] if sn_types[type_ind] == 'Ia' else np.sum(probs[1:-1])
-        if prob > 0:
-            lnprob = np.log(prob)
-        else:
-            lnprob = -np.inf
-        if make_fit_figs:
-            sse.make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results,
-                             bestfit_models, figtext)
-    else:
-        # fit probability of injected model being returned
-        # if this was p = p(m) * p(d|m) / p(d) = p(m) * p(d|m) / sum_i(p(d|mi)p(mi)) then
-        # ln(p) = ln(p(m)) - x2/2 - ln(sum_i(p(d|mi)p(mi)))
-        sum_i = np.sum(np.append(sn_priors*np.exp(-0.5 * x2s), fire))
-        if sum_i > 0:
-            lnprobs_norm = np.log(sum_i)
-        else:
-            # if p(fire)*exp(-x2_f/2) has rounded to zero, and all fits are bad enough to be zero
-            # as well, then the normalisation for this fit can just be the log-fire probability,
-            # which we can handle in log space without issue, giving a very low normalisation for
-            # this fit
-            lnprobs_norm = -x2_f / 2 + np.log(fire_prior)
-        lnprob = np.log(sn_priors[type_ind]) - x2s[type_ind]/2 - lnprobs_norm
 
-        if make_fit_figs:
-            probs = np.append(sn_priors*np.exp(-0.5 * x2s), fire)
-            probs /= np.sum(probs)
-            sse.make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results,
-                             bestfit_models, figtext)
-    if return_full:
+    # fit probability of injected model being returned
+    # if this was p = p(m) * p(d|m) / p(d) = p(m) * p(d|m) / sum_i(p(d|mi)p(mi)) then
+    # ln(p) = ln(p(m)) - x2/2 - ln(sum_i(p(d|mi)p(mi)))
+    sum_i = np.sum(np.append(sn_priors*np.exp(-0.5 * x2s), fire))
+    if sum_i > 0:
+        lnprobs_norm = np.log(sum_i)
+    else:
+        # if p(fire)*exp(-x2_f/2) has rounded to zero, and all fits are bad enough to be zero
+        # as well, then the normalisation for this fit can just be the log-fire probability,
+        # which we can handle in log space without issue, giving a very low normalisation for
+        # this fit
+        lnprobs_norm = -x2_f / 2 + np.log(fire_prior)
+    lnprob = np.log(sn_priors[type_ind]) - x2s[type_ind]/2 - lnprobs_norm
+
+    if make_fit_figs:
         probs = np.append(sn_priors*np.exp(-0.5 * x2s), fire)
         probs /= np.sum(probs)
-        return [lnprob, probs, x2s]
-    else:
-        fit_params = bestfit_models[type_ind].parameters
-        fit_errors = bestfit_results[type_ind].errors
-        if np.any([fit_errors.get(q) == 0 for q in ['z', 't0', 'amplitude']]):
-            return -np.inf, [np.nan]*9
-        dz_sigz = np.log10(np.abs((fit_params[0] - sn_params[0]) / (fit_errors.get('z') + 1e-30)))
-        sigz = np.log10(np.abs(fit_errors.get('z')))
-        sign_dz = np.sign(fit_params[0] - sn_params[0])
-        dt_sigt = np.log10(np.abs((fit_params[1] - sn_params[1]) / (fit_errors.get('t0') + 1e-30)))
-        sigt = np.log10(np.abs(fit_errors.get('t0')))
-        sign_dt = np.sign(fit_params[1] - sn_params[2])
-        da_siga = np.log10(np.abs((fit_params[2] - sn_params[2]) /
-                                  (fit_errors.get('amplitude') + 1e-30)))
-        siga = np.log10(np.abs(fit_errors.get('amplitude') / sn_params[2]))
-        sign_da = np.sign(fit_params[2] - sn_params[2])
-        return lnprob, [dz_sigz, dt_sigt, da_siga, sigz, sigt, siga,
-                        sign_dz, sign_dt, sign_da]
+        sse.make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results,
+                         bestfit_models, figtext)
+
+    fit_params = bestfit_models[type_ind].parameters
+    fit_errors = bestfit_results[type_ind].errors
+    if np.any([fit_errors.get(q) == 0 for q in ['z', 't0', 'amplitude']]):
+        return bad_return()
+
+    dz_sigz = np.log10(np.abs((fit_params[0] - sn_params[0]) / (fit_errors.get('z') + 1e-30)))
+    sigz = np.log10(np.abs(fit_errors.get('z')))
+    sign_dz = np.sign(fit_params[0] - sn_params[0])
+    dt_sigt = np.log10(np.abs((fit_params[1] - sn_params[1]) / (fit_errors.get('t0') + 1e-30)))
+    sigt = np.log10(np.abs(fit_errors.get('t0')))
+    sign_dt = np.sign(fit_params[1] - sn_params[2])
+    da_siga = np.log10(np.abs((fit_params[2] - sn_params[2]) /
+                              (fit_errors.get('amplitude') + 1e-30)))
+    siga = np.log10(np.abs(fit_errors.get('amplitude') / sn_params[2]))
+    sign_da = np.sign(fit_params[2] - sn_params[2])
+    return lnprob, [dz_sigz, dt_sigt, da_siga, sigz, sigt, siga,
+                    sign_dz, sign_dt, sign_da]
 
 
 @profile
 def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp,
                            psf_comp_filename, dark_current, readnoise, t0, lambda_eff,
                            make_sky_figs, make_fit_figs, make_flux_figs, image_flag, multi_z_fit,
-                           psf_r, return_full, draw_sn_types, max_interval, min_offset,
+                           psf_r, draw_sn_types, max_interval, min_offset,
                            max_offset):
     logexptime, t_interval, _n_obs = p
     n_obs = int(np.rint(_n_obs))
@@ -602,7 +590,7 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
     # also limit the exposure time, image interval, and number of exposures to sensible values
     if len(filters) * len(times) <= 0 or exptime <= 0 or exptime >= 10000 or t_interval <= 0 or \
             t_interval >= max_interval or _n_obs <= 0 or _n_obs >= 30 or np.any(times > 100):
-        return -np.inf, [np.nan]*9
+        return bad_return()
 
     draw_type_ind = np.random.choice(len(draw_sn_types))
     type_ind = np.where(draw_sn_types[draw_type_ind] == sn_types)[0][0]
@@ -621,7 +609,7 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
     lc_data_table = Table(data=lc_data,
                           names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
     if not np.amax(lc_data_table['flux'].data / lc_data_table['fluxerr'].data) >= minsnr:
-        return -np.inf, [np.nan]*9
+        return bad_return()
 
     figtext = []
     z_ = sn_params[0]
@@ -633,8 +621,7 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
     figtext.append('$A = {:.3f} \\times 10^{{{}}}$'.format(A_/10**A_sig, A_sig))
 
     fit_lc_out = fit_lc(lc_data_table, sn_types, directory, filters, figtext, ncol, minsnr,
-                        sn_priors, filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params,
-                        return_full)
+                        sn_priors, filt_zp, make_fit_figs, multi_z_fit, type_ind, sn_params)
 
     if make_flux_figs:
         gs = gridcreate('09', 1, 1, 0.8, 5)
@@ -651,11 +638,12 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
         plt.tight_layout()
         plt.savefig('{}/flux_ratio.pdf'.format(directory))
 
-    if return_full:
-        return fit_lc_out
-    else:
-        lnprob, blob = fit_lc_out
-        return lnprob, blob
+    lnprob, blob = fit_lc_out
+    return lnprob, blob
+
+
+def bad_return():
+    return -np.inf, [np.nan]*9
 
 
 # TODO: eventually get list of references for everything used in here: extra codes/modules,
@@ -728,8 +716,7 @@ if __name__ == '__main__':
         [6, 7, 8, -1, -1, -1, -1, -1], [1, 16, 25, 50, 75, 84, 99]
 
     make_sky_figs, make_flux_figs, image_flag = False, False, False
-    make_fit_figs = False
-    multi_z_fit, fit_cc, return_full = False, False, False
+    make_fit_figs, multi_z_fit = False, False
 
     sub_inds_combos = [[0], [1], [2], [3], [4], [5],
                        [0, 1], [0, 2], [0, 3], [0, 4], [0, 5],
@@ -749,7 +736,7 @@ if __name__ == '__main__':
             lambda_eff = lambda_eff_master[sub_inds]
             args = (directory, sn_types, filters, pixel_scale, filt_zp, psf_comp_filename,
                     dark_current, readnoise, t0, lambda_eff, make_sky_figs, make_fit_figs,
-                    make_flux_figs, image_flag, multi_z_fit, psf_r, return_full, draw_sn_types,
+                    make_flux_figs, image_flag, multi_z_fit, psf_r, draw_sn_types,
                     max_interval, min_offset, max_offset)
 
             subname = ''
@@ -773,11 +760,11 @@ if __name__ == '__main__':
                 load = False
                 changeloadflag = True
 
-            pos = [2.5, 20, 4] + 0.5*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
+            pos = [2.5, 10, 8] + 0.5*np.random.randn(nwalkers, ndim)  # exptime, t_interval, n_obs
 
             if not load:
                 start = timeit.default_timer()
-                pool = Pool(10)
+                pool = Pool(12)
                 sampler = emcee.EnsembleSampler(nwalkers, ndim, run_filt_cadence_combo, args=args,
                                                 pool=pool)
                 sampler.run_mcmc(pos, nchain)

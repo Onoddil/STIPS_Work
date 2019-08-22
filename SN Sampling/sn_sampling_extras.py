@@ -201,6 +201,38 @@ def make_fit_fig(directory, sn_types, probs, x2s, lc_data, ncol, bestfit_results
 def make_goodness_corner_fig(percentiles, names, ndim, params, axis_names, fracinds, flat_samples,
                              flat_blobs, labels, directory, subname, min_1d_count, min_2d_count,
                              max_interval, min_offset, max_offset):
+
+    _param = 10**params[0] * flat_blobs[:, 6]
+
+    paramslice = _param[(flat_samples[:, 0] >= 3) & (flat_samples[:, 0] <= 3.2) &
+                        (flat_samples[:, 2] >= 7) & (flat_samples[:, 2] <= 8.5)]
+    print(len(paramslice))
+
+    from scipy.stats import norm
+
+    mu, std = norm.fit(paramslice)
+    print(mu, std)
+
+    gs = gridcreate('1231', 1, 1, 0.8, 5)
+    ax = plt.subplot(gs[0])
+    hist, bins = np.histogram(paramslice, bins=50)
+    ax.plot(bins, np.append(hist / np.diff(bins), 0) / np.sum(hist), 'k-', drawstyle='steps-post')
+    x = np.linspace(bins[0], bins[-1], 1000)
+    ax.plot(x, norm.pdf(x, mu, std), 'r-')
+    ax.plot(x, norm.pdf(x, 0, 1), 'b-')
+    ax.set_xlabel(r'$\Delta$z/$\sigma_\mathrm{{z}}$')
+    ax.set_ylabel('PDF')
+    plt.tight_layout()
+    plt.savefig('test_pdf.pdf')
+
+
+
+
+
+
+
+
+    sys.exit()
     gs_outer = gridcreate('0', len(percentiles), len(names), 1, 4*ndim)
     for jj, (param, name, axis_name, fracind) in enumerate(zip(params, names,
                                                                axis_names, fracinds)):
