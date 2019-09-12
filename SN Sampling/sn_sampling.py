@@ -344,7 +344,7 @@ def make_images(filters, pixel_scale, sn_type, times, exptime, filt_zp, psf_comp
     return images_with_sn, images_without_sn, diff_images, lc_data, sn_params, true_flux
 
 
-def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, psf_r):
+def make_fluxes(filters, sn_type, times, filt_zp, t0, exptime, psf_r, dark, readnoise):
     nfilts = len(filters)
     ntimes = len(times)
 
@@ -600,7 +600,8 @@ def run_filt_cadence_combo(p, directory, sn_types, filters, pixel_scale, filt_zp
                         psf_comp_filename, dark_current, readnoise, t0, lambda_eff)
     else:
         lc_data, sn_params, true_flux = make_fluxes(filters, sn_types[type_ind], times,
-                                                    filt_zp, t0, exptime, psf_r)
+                                                    filt_zp, t0, exptime, psf_r, dark_current,
+                                                    readnoise)
 
     if make_sky_figs and image_flag:
         sse.make_figures(images_with_sn, images_without_sn, diff_images, filters, times,
