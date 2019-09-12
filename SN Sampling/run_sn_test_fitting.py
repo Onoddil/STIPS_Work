@@ -126,18 +126,22 @@ def make_fluxes(filters, times, filt_zp, t0, exptime, psf_r, dark, readnoise):
     return lc_data, sn_params, true_flux
 
 
-sse.register_filters(['z087', 'y106', 'w149', 'j129', 'h158', 'f184'])
+filters_master = np.array(['z087', 'y106', 'w149', 'j129', 'h158', 'f184'])
+filt_zp_master = np.array([26.39, 26.41, 27.50, 26.35, 26.41, 25.96])
+
+sse.register_filters(filters_master)
 
 for source in ['hsiao', 'nugent-sn91t', 'nugent-sn91bg', 'snana-2007y', 'snana-2004fe',
                'snana-2007kw', 'nugent-sn2l', 'nugent-sn2n']:
     for filt in ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']:
         sn_model = sncosmo.Model(source)
+        sn_model.set(t0=0, z=1)
         print(source, filt, sn_model._source.peakphase(filt))
 sys.exit()
 
 
-filters = ['y106', 'f184']
-filt_zp = [26.41, 25.96]
+filters = filters_master[[0, 1, 3, 5]]
+filt_zp = filt_zp_master[[0, 1, 3, 5]]
 min_offset, max_offset = -100, -5
 n_obs = 15
 t_interval = 5
@@ -220,4 +224,4 @@ ax.legend()
 ax.set_xlabel(r'$\Delta$z/$\sigma_\mathrm{{z}}$')
 ax.set_ylabel('PDF')
 plt.tight_layout()
-plt.savefig('test_pdf_run_fitting_single.pdf')
+plt.savefig('test_pdf_run_fitting.pdf')
