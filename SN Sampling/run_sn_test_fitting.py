@@ -35,29 +35,6 @@ def hess_mle_gauss(p, x):
     return -2 * np.array([[d2lnfdu2, d2lnfdudc], [d2lnfdudc, d2lnfdc2]])
 
 
-def sumgauss(p, x, y, o, dx):
-    return np.sum((y - fitgauss(p, x, dx))**2 / o**2)
-
-
-def fitgauss(p, x, dx):
-    u = p[0]
-    c = p[1]
-    return 1/(2 * dx) * (erf((x+dx - u)/(np.sqrt(2) * c)) - erf((x - u)/(np.sqrt(2) * c)))
-
-
-def gradgauss(p, x, y, o, dx):
-    u = p[0]
-    c = p[1]
-    dzdu = -1/dx * 1/(np.sqrt(2) * np.pi) / c * (
-        np.exp(-0.5 * (x + dx - u)**2 / c**2) - np.exp(-0.5 * (x - u)**2 / c**2))
-    dzdc = -1/dx * 1/(np.sqrt(2) * np.pi) / c**2 * (
-        (x + dx - u) * np.exp(-0.5 * (x + dx - u)**2 / c**2) -
-        (x - u) * np.exp(-0.5 * (x - u)**2 / c**2))
-    dfdu = np.sum(-2 * (y - fitgauss(p, x, dx)) / o**2 * dzdu)
-    dfdc = np.sum(-2 * (y - fitgauss(p, x, dx)) / o**2 * dzdc)
-    return np.array([dfdu, dfdc])
-
-
 def gridcreate(name, y, x, ratio, z, **kwargs):
     # Function that creates a blank axis canvas; each figure gets a name (or alternatively a number
     # if none is given), and gridspec creates an N*M grid onto which you can create axes for plots.
@@ -171,7 +148,7 @@ dark, readnoise, psf_r = 0.015, 20, 3
 
 tot = 50
 
-runs = 5
+runs = 10
 rows = np.ceil(np.sqrt(runs)).astype(int)
 cols = np.ceil(runs / rows).astype(int)
 gs = gridcreate('asdasd', cols, rows, 0.8, 5)
@@ -182,8 +159,6 @@ for j in range(runs):
 
     early = np.empty(tot, np.bool)
     relative_offsets = np.empty(tot, float)
-
-    multi_z_fit = False
 
     z_min, z_max = 0.2, 1.5
 
@@ -205,22 +180,8 @@ for j in range(runs):
         params = ['t0', 'amplitude']
         params += ['z']
 
-        if multi_z_fit:
-            result = None
-            fitted_model = None
-            for z_init in np.linspace(z_min, z_max, 10):
-                sn_model.set(z=z_init)
-                result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
-                                                                bounds=bounds, minsnr=5,
-                                                                guess_z=False)
-                if result is None or result_temp.chisq < result.chisq:
-                    result = result_temp
-                    fitted_model = fitted_model_temp
-        else:
-            fitted_model = sn_model
-
-        result, fitted_model = sncosmo.fit_lc(lc_data, fitted_model, params, bounds=bounds,
-                                              minsnr=5, guess_z=False if multi_z_fit else True)
+        result, fitted_model = sncosmo.fit_lc(lc_data, sn_model, params, bounds=bounds,
+                                              minsnr=5, guess_z=True)
         if np.any([message in result.message for message in ['error invalid',
                    'positive definite', 'No covar', 'Failed']]) or not result.success:
             continue
@@ -235,7 +196,10 @@ for j in range(runs):
             print(i)
 
     for slicing, c in zip([np.ones(tot, np.bool), early, np.logical_not(early)], ['k', 'r', 'b']):
-        cut = np.copy(relative_offsets[slicing & (np.abs(relative_offsets) <= 4)])
+        _cut = slicing & (np.abs(relative_offsets) <= 4)
+        if np.sum(_cut) == 0:
+            continue
+        cut = np.copy(relative_offsets[_cut])
         hist, bins = np.histogram(cut, bins='auto')
         if bins[1] - bins[0] > 1:
             hist, bins = np.histogram(cut, bins=np.arange(bins[0], bins[-1]+1e-10, 1))
@@ -243,21 +207,20 @@ for j in range(runs):
         _pdf = np.append(hist / np.diff(bins), 0) / np.sum(hist[sig_cut])
         _pdf_uncert = np.append(np.sqrt(hist) / np.diff(bins), 0) / np.sum(hist[sig_cut])
         ax.plot(bins, _pdf, ls='-', c=c, drawstyle='steps-post')
-        # output1 = minimize(sumgauss, x0=[0, 1],
-        #                    args=(bins[:-1], _pdf[:-1], _pdf_uncert[:-1]+1e-10, np.diff(bins)),
-        #                    jac=gradgauss, method='L-BFGS-B', options = {'maxiter': 10000})
-        # N = len(hist)
         output1 = minimize(fun_mle_gauss, x0=[0, 1], args=(cut), jac=True, method='newton-cg',
                            hess=hess_mle_gauss, options = {'maxiter': 10000})
-        N = len(cut)
+        hess = hess_mle_gauss(output1.x, cut)
+        # TODO: diagonalise the matrix to ensure covariance isn't missed, resulting in
+        # underestimated uncertainties
+        dmu, dstd = 1/np.sqrt(hess[0, 0]), 1/np.sqrt(hess[1, 1])
 
         mu, std = output1.x
         std = np.abs(std)
-        label = r'$\mu$={:.2f}, $\sigma$={:.2f}, N={}, $\chi^2_\nu$={:.2f}, $\chi^2$={:.2f}'
+        label = r'$\mu$={:.3f}$\pm${:.3f}, $\sigma$={:.3f}$\pm${:.3f}, N={}'
 
         x = np.linspace(bins[0], bins[-1], 10000)
-        ax.plot(x, norm.pdf(x, mu, std), ls='--', c=c,
-                label=label.format(*output1.x, len(cut), output1.fun / (N - 2), output1.fun))
+        ax.plot(x, norm.pdf(x, mu, std), ls='--', c=c, label=label.format(mu, dmu, std, dstd,
+                len(cut)))
 
     x = np.linspace(*ax.get_xlim(), 1000)
     ax.plot(x, norm.pdf(x, 0, 1), ls='-', c='orange')
