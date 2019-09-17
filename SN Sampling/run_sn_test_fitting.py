@@ -15,6 +15,26 @@ if signal.getsignal(signal.SIGHUP) != signal.SIG_DFL:
     matplotlib.use('Agg')  # change to non-interactive backend if nohup mode used
 
 
+def fun_mle_gauss(p, x):
+    u = p[0]
+    c = np.abs(p[1])
+    N = len(x)
+    ln_prob = -N * np.log(np.sqrt(2*np.pi) * c) - np.sum((x - u)**2) / (2 * c**2)
+    dlnfdu = np.sum(x - u) / c**2
+    dlnfdc = -N / c + np.sum((x - u)**2) / c**3
+    return -2 * ln_prob, -2 * np.array([dlnfdu, dlnfdc])
+
+
+def hess_mle_gauss(p, x):
+    u = p[0]
+    c = np.abs(p[1])
+    N = len(x)
+    d2lnfdu2 = -N / c**2
+    d2lnfdc2 = N / c**2 - 3 / c**4 * np.sum((x - u)**2)
+    d2lnfdudc = -2 / c**3 * np.sum(x - u)
+    return -2 * np.array([[d2lnfdu2, d2lnfdudc], [d2lnfdudc, d2lnfdc2]])
+
+
 def sumgauss(p, x, y, o, dx):
     return np.sum((y - fitgauss(p, x, dx))**2 / o**2)
 
@@ -131,97 +151,119 @@ filt_zp_master = np.array([26.39, 26.41, 27.50, 26.35, 26.41, 25.96])
 
 sse.register_filters(filters_master)
 
-for source in ['hsiao', 'nugent-sn91t', 'nugent-sn91bg', 'snana-2007y', 'snana-2004fe',
-               'snana-2007kw', 'nugent-sn2l', 'nugent-sn2n']:
-    for filt in ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']:
-        sn_model = sncosmo.Model(source)
-        sn_model.set(t0=0, z=1)
-        print(source, filt, sn_model._source.peakphase(filt))
-sys.exit()
+# for source in ['hsiao', 'nugent-sn91t', 'nugent-sn91bg', 'snana-2007y', 'snana-2004fe',
+#                'snana-2007kw', 'nugent-sn2l', 'nugent-sn2n']:
+#     for filt in ['z087', 'y106', 'w149', 'j129', 'h158', 'f184']:
+#         sn_model = sncosmo.Model(source)
+#         sn_model.set(t0=0, z=1)
+#         print(source, filt, sn_model._source.peakphase(filt))
+# sys.exit()
 
 
-filters = filters_master[[0, 1, 3, 5]]
-filt_zp = filt_zp_master[[0, 1, 3, 5]]
+filt_ids = [0, 1, 3, 5]
+filters = filters_master[filt_ids]
+filt_zp = filt_zp_master[filt_ids]
 min_offset, max_offset = -100, -5
 n_obs = 15
 t_interval = 5
 t0, exptime = 0, 400
 dark, readnoise, psf_r = 0.015, 20, 3
 
-N = 5000
-detection = np.empty(N, np.bool)
-relative_offsets = np.empty(N, float)
+tot = 50
 
-multi_z_fit = False
+runs = 5
+rows = np.ceil(np.sqrt(runs)).astype(int)
+cols = np.ceil(runs / rows).astype(int)
+gs = gridcreate('asdasd', cols, rows, 0.8, 5)
 
-z_min, z_max = 0.2, 1.5
+for j in range(runs):
+    print(j)
+    ax = plt.subplot(gs[j])
 
-i = 0
-while i < N:
-    t_low = np.random.uniform(min_offset, max_offset)
-    t_high = (n_obs - 1) * t_interval + t_low
-    times = np.arange(t_low, t_high, t_interval)
-    detection[i] = 0 if t_high < 0 else 1
-    sn_model = sncosmo.Model('hsiao')
+    early = np.empty(tot, np.bool)
+    relative_offsets = np.empty(tot, float)
 
-    lc_data, sn_params, true_flux = make_fluxes(filters, times, filt_zp, t0, exptime, psf_r, dark,
-                                                readnoise)
-    lc_data = Table(data=lc_data, names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
-    if not np.amax(lc_data['flux'].data / lc_data['fluxerr'].data) >= 5:
-        continue
+    multi_z_fit = False
 
-    bounds = {}
-    bounds.update({'z': (0.2, 1.5)})
-    params = ['t0', 'amplitude']
-    params += ['z']
+    z_min, z_max = 0.2, 1.5
 
-    if multi_z_fit:
-        result = None
-        fitted_model = None
-        for z_init in np.linspace(z_min, z_max, 10):
-            sn_model.set(z=z_init)
-            result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
-                                                            bounds=bounds, minsnr=5,
-                                                            guess_z=False)
-            if result is None or result_temp.chisq < result.chisq:
-                result = result_temp
-                fitted_model = fitted_model_temp
-    else:
-        fitted_model = sn_model
+    i = 0
+    while i < tot:
+        t_low = np.random.uniform(min_offset, max_offset)
+        t_high = (n_obs - 1) * t_interval + t_low
+        times = np.arange(t_low, t_high, t_interval)
+        sn_model = sncosmo.Model('hsiao')
 
-    result, fitted_model = sncosmo.fit_lc(lc_data, fitted_model, params, bounds=bounds,
-                                          minsnr=5, guess_z=False if multi_z_fit else True)
-    if np.any([message in result.message for message in ['error invalid',
-               'positive definite', 'No covar', 'Failed']]) or not result.success:
-        detection[i] = 0
-    fit_params = fitted_model.parameters
-    fit_errors = result.errors
-    dz_sigz = (fit_params[0] - sn_params[0]) / (fit_errors.get('z') + 1e-30)
-    relative_offsets[i] = dz_sigz
-    i += 1
-    print(i)
+        lc_data, sn_params, true_flux = make_fluxes(filters, times, filt_zp, t0, exptime, psf_r,
+                                                    dark, readnoise)
+        lc_data = Table(data=lc_data, names=['time', 'band', 'flux', 'fluxerr', 'zp', 'zpsys'])
+        if not np.amax(lc_data['flux'].data / lc_data['fluxerr'].data) >= 5:
+            continue
 
-gs = gridcreate('asdasd', 1, 1, 0.8, 5)
-ax = plt.subplot(gs[0])
-for slicing, c in zip([detection, np.logical_not(detection)], ['k', 'r']):
-    if np.sum(slicing) > 0:
-        cut = relative_offsets[slicing & (np.abs(relative_offsets) < 10)]
-        hist, bins = np.histogram(cut, bins=100)
-        _pdf = np.append(hist / np.diff(bins), 0) / np.sum(hist)
-        ax.plot(bins, _pdf, ls='-', c=c,
-                drawstyle='steps-post')
-        # mu, std = norm.fit(cut)
-        output1 = minimize(sumgauss, x0=np.array([0, 1]),
-                           args=(bins[:-1], _pdf[:-1], np.sqrt(_pdf[:-1] + 0.001), np.diff(bins)),
-                           jac=gradgauss, method='newton-cg', options = {'maxiter': 10000})
+        bounds = {}
+        bounds.update({'z': (0.2, 1.5)})
+        params = ['t0', 'amplitude']
+        params += ['z']
+
+        if multi_z_fit:
+            result = None
+            fitted_model = None
+            for z_init in np.linspace(z_min, z_max, 10):
+                sn_model.set(z=z_init)
+                result_temp, fitted_model_temp = sncosmo.fit_lc(lc_data, sn_model, params,
+                                                                bounds=bounds, minsnr=5,
+                                                                guess_z=False)
+                if result is None or result_temp.chisq < result.chisq:
+                    result = result_temp
+                    fitted_model = fitted_model_temp
+        else:
+            fitted_model = sn_model
+
+        result, fitted_model = sncosmo.fit_lc(lc_data, fitted_model, params, bounds=bounds,
+                                              minsnr=5, guess_z=False if multi_z_fit else True)
+        if np.any([message in result.message for message in ['error invalid',
+                   'positive definite', 'No covar', 'Failed']]) or not result.success:
+            continue
+
+        fit_params = fitted_model.parameters
+        fit_errors = result.errors
+        dz_sigz = (fit_params[0] - sn_params[0]) / (fit_errors.get('z') + 1e-30)
+        early[i] = 1 if t_high < 0 else 0
+        relative_offsets[i] = dz_sigz
+        i += 1
+        if i % 25 == 0:
+            print(i)
+
+    for slicing, c in zip([np.ones(tot, np.bool), early, np.logical_not(early)], ['k', 'r', 'b']):
+        cut = np.copy(relative_offsets[slicing & (np.abs(relative_offsets) <= 4)])
+        hist, bins = np.histogram(cut, bins='auto')
+        if bins[1] - bins[0] > 1:
+            hist, bins = np.histogram(cut, bins=np.arange(bins[0], bins[-1]+1e-10, 1))
+        sig_cut = np.abs(bins[:-1] + np.diff(bins)) <= 4
+        _pdf = np.append(hist / np.diff(bins), 0) / np.sum(hist[sig_cut])
+        _pdf_uncert = np.append(np.sqrt(hist) / np.diff(bins), 0) / np.sum(hist[sig_cut])
+        ax.plot(bins, _pdf, ls='-', c=c, drawstyle='steps-post')
+        # output1 = minimize(sumgauss, x0=[0, 1],
+        #                    args=(bins[:-1], _pdf[:-1], _pdf_uncert[:-1]+1e-10, np.diff(bins)),
+        #                    jac=gradgauss, method='L-BFGS-B', options = {'maxiter': 10000})
+        # N = len(hist)
+        output1 = minimize(fun_mle_gauss, x0=[0, 1], args=(cut), jac=True, method='newton-cg',
+                           hess=hess_mle_gauss, options = {'maxiter': 10000})
+        N = len(cut)
+
         mu, std = output1.x
-        x = np.linspace(bins[0], bins[-1], 1000)
-        ax.plot(x, norm.pdf(x, mu, std), ls='--', c=c, label=r'$\mu$={:.2f}, $\sigma$={:.2f}'.
-                format(mu, std))
-x = np.linspace(*ax.get_xlim(), 1000)
-ax.plot(x, norm.pdf(x, 0, 1), 'b-')
-ax.legend()
-ax.set_xlabel(r'$\Delta$z/$\sigma_\mathrm{{z}}$')
-ax.set_ylabel('PDF')
+        std = np.abs(std)
+        label = r'$\mu$={:.2f}, $\sigma$={:.2f}, N={}, $\chi^2_\nu$={:.2f}, $\chi^2$={:.2f}'
+
+        x = np.linspace(bins[0], bins[-1], 10000)
+        ax.plot(x, norm.pdf(x, mu, std), ls='--', c=c,
+                label=label.format(*output1.x, len(cut), output1.fun / (N - 2), output1.fun))
+
+    x = np.linspace(*ax.get_xlim(), 1000)
+    ax.plot(x, norm.pdf(x, 0, 1), ls='-', c='orange')
+    ax.legend(fontsize=5)
+    ax.set_xlabel(r'$\Delta$z/$\sigma_\mathrm{{z}}$')
+    ax.set_ylabel('PDF')
+
 plt.tight_layout()
 plt.savefig('test_pdf_run_fitting.pdf')
