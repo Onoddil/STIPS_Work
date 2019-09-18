@@ -20,3 +20,5 @@
 */*.so*
 *.pyc
 __pycache__/*
+*/*.log
+*/out_gals*
