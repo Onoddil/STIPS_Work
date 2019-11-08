@@ -146,19 +146,20 @@ t_interval = 5
 t0, exptime = 0, 400
 dark, readnoise, psf_r = 0.015, 20, 3
 
-tot = 50
+tot = 1200
 
-runs = 10
+runs = 1
 rows = np.ceil(np.sqrt(runs)).astype(int)
 cols = np.ceil(runs / rows).astype(int)
-gs = gridcreate('asdasd', cols, rows, 0.8, 5)
+gs1 = gridcreate('fig1', cols, rows, 0.8, 5)
+gs2 = gridcreate('fig2', cols, rows, 0.8, 5)
 
 for j in range(runs):
     print(j)
-    ax = plt.subplot(gs[j])
 
     early = np.empty(tot, np.bool)
     relative_offsets = np.empty(tot, float)
+    quoted_uncerts = np.empty(tot, float)
 
     z_min, z_max = 0.2, 1.5
 
@@ -191,10 +192,13 @@ for j in range(runs):
         dz_sigz = (fit_params[0] - sn_params[0]) / (fit_errors.get('z') + 1e-30)
         early[i] = 1 if t_high < 0 else 0
         relative_offsets[i] = dz_sigz
+        quoted_uncerts[i] = fit_errors.get('z')
         i += 1
         if i % 25 == 0:
             print(i)
 
+    plt.figure('fig1')
+    ax = plt.subplot(gs1[j])
     for slicing, c in zip([np.ones(tot, np.bool), early, np.logical_not(early)], ['k', 'r', 'b']):
         _cut = slicing & (np.abs(relative_offsets) <= 4)
         if np.sum(_cut) == 0:
@@ -228,5 +232,46 @@ for j in range(runs):
     ax.set_xlabel(r'$\Delta$z/$\sigma_\mathrm{{z}}$')
     ax.set_ylabel('PDF')
 
+    plt.figure('fig2')
+    ax = plt.subplot(gs2[j])
+    for slicing, c in zip([np.ones(tot, np.bool), early, np.logical_not(early)], ['k', 'r', 'b']):
+        _cut = slicing & (np.abs(quoted_uncerts) <= np.percentile(np.abs(quoted_uncerts), 80))
+        if np.sum(_cut) == 0:
+            continue
+        cut = np.copy(quoted_uncerts[_cut])
+        hist, bins = np.histogram(cut, bins='auto')
+        if bins[1] - bins[0] > 1:
+            hist, bins = np.histogram(cut, bins=np.arange(bins[0], bins[-1]+1e-10, 1))
+        sig_cut = np.abs(bins[:-1] + np.diff(bins)) <= 4
+        # divide by 2 because it's a one-sided gaussian, so should only integrate to 0.5
+        _pdf = np.append(hist / np.diff(bins), 0) / np.sum(hist[sig_cut])
+        _pdf_uncert = np.append(np.sqrt(hist) / np.diff(bins), 0) / np.sum(hist[sig_cut])
+        ax.plot(bins, _pdf, ls='-', c=c, drawstyle='steps-post')
+        output1 = minimize(fun_mle_gauss, x0=[0, 0.01], args=(cut), jac=True, method='newton-cg',
+                           hess=hess_mle_gauss, options = {'maxiter': 10000})
+        hess = hess_mle_gauss(output1.x, cut)
+        # TODO: diagonalise the matrix to ensure covariance isn't missed, resulting in
+        # underestimated uncertainties
+        dmu, dstd = 1/np.sqrt(hess[0, 0]), 1/np.sqrt(hess[1, 1])
+
+        mu, std = output1.x
+        std = np.abs(std)
+        label = r'$\mu$={:.3f}$\pm${:.3f}, $\sigma$={:.3f}$\pm${:.3f}, N={}'
+
+        x = np.linspace(bins[0], bins[-1], 10000)
+        ax.plot(x, norm.pdf(x, mu, std), ls='--', c=c, label=label.format(mu, dmu, std, dstd,
+                len(cut)))
+
+    x = np.linspace(*ax.get_xlim(), 1000)
+    ax.plot(x, norm.pdf(x, 0, 1), ls='-', c='orange')
+    ax.legend(fontsize=5)
+    ax.set_xlabel(r'$\sigma_\mathrm{{z}}$')
+    ax.set_ylabel('PDF')
+
+plt.figure('fig1')
 plt.tight_layout()
-plt.savefig('test_pdf_run_fitting.pdf')
+plt.savefig('test_pdf_run_fitting_normdelta.pdf')
+
+plt.figure('fig2')
+plt.tight_layout()
+plt.savefig('test_pdf_run_fitting_uncerts.pdf')
