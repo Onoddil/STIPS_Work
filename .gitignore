@@ -15,6 +15,7 @@
 ._.DS_Store
 */._.DS_Store
 !salt2-guy2010-parameters.txt
+*/!salt2-guy2010-parameters.txt
 */*.lprof
 */._*
 */*.so*

@@ -84,14 +84,14 @@ res = minimize(fit_min, [21, 0.3], method='L-BFGS-B', jac=True, args=(xy[:, 0], 
 gs = gridcreate('vnb', 1, 1, 0.8, 15)
 ax = plt.subplot(gs[0])
 ax.plot(np.append(xy[:, 0] - dx/2, xy[-1, 0]+dx/2), np.append(xy[:, 1], 0), 'k-',
-    drawstyle='steps-post')
+        drawstyle='steps-post')
 mu, c = res.x
 x, y = xy[:, 0], xy[:, 1]
 f = 0.5 * (erf(1/np.sqrt(2) * (x+dx - mu) / c) - erf(1/np.sqrt(2) * (x - mu) / c))
 ax.plot(xy[:, 0], f, 'r-')
 ax.set_xlabel('x')
 ax.set_ylabel('y')
-ax.set_title('$\mu$ = {:.2f}, $\sigma$ = {:.2f}'.format(mu, c))
+ax.set_title(r'$\mu$ = {:.2f}, $\sigma$ = {:.2f}'.format(mu, c))
 plt.tight_layout()
 plt.savefig('shen2003_mu.pdf')
 print(res)

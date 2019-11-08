@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import scipy.optimize
 from scipy.special import erf
 
+
 def gridcreate(name, y, x, ratio, z, **kwargs):
     # Function that creates a blank axis canvas; each figure gets a name (or alternatively a number
     # if none is given), and gridspec creates an N*M grid onto which you can create axes for plots.
@@ -37,20 +38,6 @@ def gradg(p, x, y, dx, o):
     return np.array([np.sum(-2 * (y - f) * i / o**2) for i in [dfdx0, dfdc]])
 
 
-# def hessg(p, x, y, dx, o):
-#     f = fitg(p, x, dx)
-#     x0 = p[0]
-#     c = p[1]
-#     dfdx0 = (np.exp(-0.5*(x-x0)**2/c**2) - np.exp(-0.5 * (x+dx-x0)**2/c**2)) / (np.sqrt(2)*np.pi*c)
-#     dfdc = ((x-x0) * np.exp(-0.5*(x-x0)**2/c**2) -
-#             (x+dx-x0) * np.exp(-0.5 * (x+dx-x0)**2/c**2)) / (np.sqrt(2)*np.pi*c**2)
-#     hess = np.empty((2, 2), float)
-#     hess[0, 1] = hess[1, 0] = 0
-#     hess[0, 0] = np.sum(2 * dfdx0**2 / o**2 - 2 * (y - f) * df2dx02)
-#     hess[1, 1] = np.sum(2 * dfdc**2 / o**2)
-#     return hess
-
-
 gs = gridcreate('111', 1, 2, 0.8, 15)
 ax = plt.subplot(gs[0])
 
@@ -64,10 +51,11 @@ o[o == 0] = 10
 y = hist / np.sum(hist)
 
 output2 = scipy.optimize.minimize(sumg, x0=np.array([-0.1, 1]), args=(x, y, dx, o),
-                        jac=gradg, method='newton-cg',# hess=hessg,
-                        options={'maxiter': 10000, 'xtol': 1e-6})
+                                  jac=gradg, method='newton-cg',
+                                  options={'maxiter': 10000, 'xtol': 1e-6})
 x0, c = output2.x
-ax.plot(bins, np.append(np.sum(hist) * fitg([x0, c], x, dx), 0), 'r-', label='x$_0$ = {:.2f}, $\sigma$ = {:.2f}'.format(x0, c), drawstyle='steps-post')
+ax.plot(bins, np.append(np.sum(hist) * fitg([x0, c], x, dx), 0), 'r-',
+        label=r'x$_0$ = {:.2f}, $\sigma$ = {:.2f}'.format(x0, c), drawstyle='steps-post')
 x_ = np.linspace(bins[0], bins[-1], 500)
 dx_ = np.mean(np.diff(bins))
 
@@ -90,10 +78,11 @@ o[o == 0] = 10
 y = hist / np.sum(hist)
 
 output2 = scipy.optimize.minimize(sumg, x0=np.array([0, 1]), args=(x, y, dx, o),
-                        jac=gradg, method='newton-cg',# hess=hessg,
-                        options={'maxiter': 10000, 'xtol': 1e-6})
+                                  jac=gradg, method='newton-cg',
+                                  options={'maxiter': 10000, 'xtol': 1e-6})
 x0, c = output2.x
-ax.plot(bins, np.append(np.sum(hist) * fitg([x0, c], x, dx), 0), 'r-', label='x$_0$ = {:.3f}, $\sigma$ = {:.3f}'.format(x0, c), drawstyle='steps-post')
+ax.plot(bins, np.append(np.sum(hist) * fitg([x0, c], x, dx), 0), 'r-',
+        label=r'x$_0$ = {:.3f}, $\sigma$ = {:.3f}'.format(x0, c), drawstyle='steps-post')
 x_ = np.linspace(bins[0], bins[-1], 500)
 dx_ = np.mean(np.diff(bins))
 

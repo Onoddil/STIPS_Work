@@ -21,8 +21,7 @@ ax = plt.subplot(gs[0])
 filters_master = ['r062', 'f184', 'h158', 'j129', 'w149', 'y106', 'z087']
 colours_master = ['k', 'r', 'b', 'g', 'c', 'm', 'orange']
 for j, (filt, c) in enumerate(zip(filters_master, colours_master)):
-    # f = pyfits.open('../pandeia_data-1.0/wfirst/wfirstimager/filters/{}.fits'.format(filt))
-    f = pyfits.open('../webbpsf-data/WFI/filters/{}_throughput.fits'.format(filt.upper()))
+    f = pyfits.open('../../webbpsf-data/WFI/filters/{}_throughput.fits'.format(filt.upper()))
     data = f[1].data
     dispersion = np.array([d[0] * 1e-4 for d in data])
     transmission = np.array([d[1] * 0.95 for d in data])
