@@ -149,7 +149,7 @@ def mog_add_psf(image, psf_params, filt_zp, psf_c):
     return image
 
 
-def create_psf_image(filter_, directory, oversamp):
+def create_psf_image(filter_, oversamp):
     # see https://webbpsf.readthedocs.io/en/stable/wfirst.html for details of detector things
     wfi = wfirst.WFI()
     wfi.filter = filter_
@@ -540,7 +540,7 @@ if __name__ == '__main__':
         # propagated into reduced_psf with [1] unchaged but [0] now the ePSF (the detector-pixel
         # sampled fraction at oversampling levels of pixel positions).
         for filter_ in filters:
-            psf = create_psf_image(filter_, 'psf_fit', oversamp)
+            psf = create_psf_image(filter_, oversamp)
             psfs.append(psf)
             reduced_psf = create_effective_psf(psf, oversamp)
             rp_hdulist = pyfits.HDUList([a for a in reduced_psf])

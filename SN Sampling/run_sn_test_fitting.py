@@ -6,7 +6,6 @@ from matplotlib import gridspec
 import matplotlib.pyplot as plt
 from scipy.stats import norm
 import sn_sampling_extras as sse
-from scipy.special import erf
 from scipy.optimize import minimize
 
 import signal

@@ -1,4 +1,3 @@
-from __future__ import division
 import matplotlib.gridspec as gridspec
 import numpy as np
 

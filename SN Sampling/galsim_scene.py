@@ -82,7 +82,7 @@ def main(argv):
     use_SCA = 7  # This could be any number from 1...18
     remake_psfs = False
     for filter_ in filters:
-        if remake_psfs or not os.path.exists('psf_fit/{}.fits'.format(filter_)):
+        if remake_psfs or not os.path.exists('../PSFs/{}.fits'.format(filter_)):
             wfi = wfirst_wpsf.WFI()
             wfi.filter = filter_
             wfi.detector = 'SCA09'
@@ -91,10 +91,10 @@ def main(argv):
             wfi.options['parity'] = 'odd'
             wfi.options['output_mode'] = 'both'
             psf_ = wfi.calc_psf(oversample=10)
-            psf_.writeto('psf_fit/{}.fits'.format(filter_), overwrite=True)
+            psf_.writeto('../PSFs/{}.fits'.format(filter_), overwrite=True)
             psf_ = psf_[0]
         else:
-            psf_ = pyfits.open('psf_fit/{}.fits'.format(filter_))[0]
+            psf_ = pyfits.open('../PSFs/{}.fits'.format(filter_))[0]
         psfs.append(galsim.InterpolatedImage(galsim.Image(psf_.data),
                     scale=psf_.header['PIXELSCL']))
 
